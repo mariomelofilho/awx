@@ -128,6 +128,24 @@ VOLUME /var/lib/nginx
 RUN ln -sf /dev/stdout /var/log/nginx/access.log \
     && ln -sf /dev/stderr /var/log/nginx/error.log
 
+#Prepare venv for compute. Use same env to avoid missing features
+RUN mkdir -p /opt/my-envs/compute
+RUN pip freeze > /opt/my-envs/compute/requirements_base.txt
+RUN python3 -m venv /opt/my-envs/compute
+RUN cd /opt/my-envs/compute
+
+RUN echo -e "source /opt/my-envs/compute/bin/activate" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade pip" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade setuptools" >> /tmp/my_venv_activate
+RUN echo -e "pip install -r /opt/my-envs/compute/requirements_base.txt" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade --ignore-installed 'pyasn1>=0.2.3' 'PyYAML>=3.12' 'idna<=2.9,>=2.5'" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade --ignore-installed  ansible==2.8.4 omsdk jmespath lxml>=4.3.0 pyVmomi>=6.7 ansible-tower-cli" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade --force-reinstall 'git+https://github.com/vmware/vsphere-automation-sdk-python.git#egg=vSphereAutomationSDK'" >> /tmp/my_venv_activate
+RUN chmod 750 /tmp/my_venv_activate
+RUN /tmp/my_venv_activate
+RUN rm -f /tmp/my_venv_activate
+
+
 ENV HOME=/home/awx
 WORKDIR ${HOME}
 USER 1000

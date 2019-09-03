@@ -1,6 +1,42 @@
 FROM {{ web_image }}:{{ awx_version }}
 USER 0
+SHELL ["/bin/bash", "-c"]
+
 RUN sudo yum -y remove nginx
+RUN pip install --upgrade  pip pip
+RUN pip install --upgrade  pip setuptools
+
+#Prepare venv for compute. Use same env to avoid missing features
+RUN mkdir -p /opt/my-envs/compute
+RUN pip freeze > /opt/my-envs/compute/requirements_base.txt
+RUN python3 -m venv /opt/my-envs/compute
+RUN cd /opt/my-envs/compute
+
+#RUN ["/bin/bash", "-c", "source /opt/my-envs/compute/bin/activate"]
+#RUN echo -e "#!/bin/bash" >> /tmp/my_venv_activate
+RUN echo -e "source /opt/my-envs/compute/bin/activate" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade pip" >> /tmp/my_venv_activate
+RUN echo -e "pip install -r /opt/my-envs/compute/requirements_base.txt" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade --ignore-installed 'pyasn1>=0.2.3' 'PyYAML>=3.12' 'idna<=2.9,>=2.5'" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade --ignore-installed  ansible==2.8.4 omsdk jmespath lxml>=4.3.0 pyVmomi>=6.7 ansible-tower-cli" >> /tmp/my_venv_activate
+RUN echo -e "pip install --upgrade --force-reinstall 'git+https://github.com/vmware/vsphere-automation-sdk-python.git#egg=vSphereAutomationSDK'" >> /tmp/my_venv_activate
+RUN chmod 750 /tmp/my_venv_activate
+RUN /tmp/my_venv_activate
+RUN rm -f /tmp/my_venv_activate
+
+#RUN pip install -r /opt/my-envs/compute/requirements_base.txt
+
+##VSPHERE AUTOMATION SDK INSTALL
+#RUN pip install --upgrade --ignore-installed 'pyasn1>=0.2.3' 'PyYAML>=3.12' 'idna<=2.9,>=2.5'
+#RUN pip install --upgrade --ignore-installed  ansible==2.8.4 omsdk jmespath lxml>=4.3.0 pyVmomi>=6.7 ansible-tower-cli
+#RUN pip install --upgrade --force-reinstall 'git+https://github.com/vmware/vsphere-automation-sdk-python.git#egg=vSphereAutomationSDK' 
+
+#RUN ["/bin/bash", "-c", "deactivate"]
+#RUN deactivate
+#RUN echo "deactivate" >> /tmp/my_venv_deactivate
+#RUN /bin/bash -C "/tmp/my_venv_deactivate"
+#RUN rm -f /tmp/my_venv_deactivate
+
 USER 1000
 EXPOSE 8052
 CMD /usr/bin/launch_awx_task.sh
