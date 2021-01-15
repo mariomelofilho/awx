@@ -45,7 +45,6 @@ from polymorphic.models import PolymorphicModel
 from awx.main.access import get_user_capabilities
 from awx.main.constants import (
     SCHEDULEABLE_PROVIDERS,
-    ANSI_SGR_PATTERN,
     ACTIVE_STATES,
     CENSOR_VALUE,
 )
@@ -70,8 +69,10 @@ from awx.main.utils import (
     get_type_for_model, get_model_for_type,
     camelcase_to_underscore, getattrd, parse_yaml_or_json,
     has_model_field_prefetched, extract_ansible_vars, encrypt_dict,
-    prefetch_page_capabilities, get_external_account)
+    prefetch_page_capabilities, get_external_account, truncate_stdout,
+)
 from awx.main.utils.filters import SmartFilter
+from awx.main.utils.named_url_graph import reset_counters
 from awx.main.redact import UriCleaner, REPLACE_STR
 
 from awx.main.validators import vars_validate_or_raise
@@ -98,26 +99,19 @@ SUMMARIZABLE_FK_FIELDS = {
                                            'total_hosts',
                                            'hosts_with_active_failures',
                                            'total_groups',
-                                           'groups_with_active_failures',
                                            'has_inventory_sources',
                                            'total_inventory_sources',
                                            'inventory_sources_with_failures',
                                            'organization_id',
                                            'kind',
                                            'insights_credential_id',),
-    'host': DEFAULT_SUMMARY_FIELDS + ('has_active_failures',
-                                      'has_inventory_sources'),
-    'group': DEFAULT_SUMMARY_FIELDS + ('has_active_failures',
-                                       'total_hosts',
-                                       'hosts_with_active_failures',
-                                       'total_groups',
-                                       'groups_with_active_failures',
-                                       'has_inventory_sources'),
+    'host': DEFAULT_SUMMARY_FIELDS,
+    'group': DEFAULT_SUMMARY_FIELDS,
     'project': DEFAULT_SUMMARY_FIELDS + ('status', 'scm_type'),
     'source_project': DEFAULT_SUMMARY_FIELDS + ('status', 'scm_type'),
     'project_update': DEFAULT_SUMMARY_FIELDS + ('status', 'failed',),
-    'credential': DEFAULT_SUMMARY_FIELDS + ('kind', 'cloud', 'credential_type_id'),
-    'job': DEFAULT_SUMMARY_FIELDS + ('status', 'failed', 'elapsed', 'type'),
+    'credential': DEFAULT_SUMMARY_FIELDS + ('kind', 'cloud', 'kubernetes', 'credential_type_id'),
+    'job': DEFAULT_SUMMARY_FIELDS + ('status', 'failed', 'elapsed', 'type', 'canceled_on'),
     'job_template': DEFAULT_SUMMARY_FIELDS,
     'workflow_job_template': DEFAULT_SUMMARY_FIELDS,
     'workflow_job': DEFAULT_SUMMARY_FIELDS,
@@ -125,20 +119,23 @@ SUMMARIZABLE_FK_FIELDS = {
     'workflow_approval': DEFAULT_SUMMARY_FIELDS + ('timeout',),
     'schedule': DEFAULT_SUMMARY_FIELDS + ('next_run',),
     'unified_job_template': DEFAULT_SUMMARY_FIELDS + ('unified_job_type',),
-    'last_job': DEFAULT_SUMMARY_FIELDS + ('finished', 'status', 'failed', 'license_error'),
+    'last_job': DEFAULT_SUMMARY_FIELDS + ('finished', 'status', 'failed', 'license_error', 'canceled_on'),
     'last_job_host_summary': DEFAULT_SUMMARY_FIELDS + ('failed',),
     'last_update': DEFAULT_SUMMARY_FIELDS + ('status', 'failed', 'license_error'),
     'current_update': DEFAULT_SUMMARY_FIELDS + ('status', 'failed', 'license_error'),
     'current_job': DEFAULT_SUMMARY_FIELDS + ('status', 'failed', 'license_error'),
     'inventory_source': ('source', 'last_updated', 'status'),
     'custom_inventory_script': DEFAULT_SUMMARY_FIELDS,
-    'source_script': ('name', 'description'),
+    'source_script': DEFAULT_SUMMARY_FIELDS,
     'role': ('id', 'role_field'),
     'notification_template': DEFAULT_SUMMARY_FIELDS,
-    'instance_group': {'id', 'name', 'controller_id'},
+    'instance_group': ('id', 'name', 'controller_id', 'is_containerized'),
     'insights_credential': DEFAULT_SUMMARY_FIELDS,
     'source_credential': DEFAULT_SUMMARY_FIELDS + ('kind', 'cloud', 'credential_type_id'),
     'target_credential': DEFAULT_SUMMARY_FIELDS + ('kind', 'cloud', 'credential_type_id'),
+    'webhook_credential': DEFAULT_SUMMARY_FIELDS + ('kind', 'cloud', 'credential_type_id'),
+    'approved_or_denied_by': ('id', 'username', 'first_name', 'last_name'),
+    'credential_type': DEFAULT_SUMMARY_FIELDS,
 }
 
 
@@ -351,6 +348,7 @@ class BaseSerializer(serializers.ModelSerializer, metaclass=BaseSerializerMetacl
 
     def _generate_named_url(self, url_path, obj, node):
         url_units = url_path.split('/')
+        reset_counters()
         named_url = node.generate_named_url(obj)
         url_units[4] = named_url
         return '/'.join(url_units)
@@ -455,7 +453,7 @@ class BaseSerializer(serializers.ModelSerializer, metaclass=BaseSerializerMetacl
                 if 'capability_map' not in self.context:
                     if hasattr(self, 'polymorphic_base'):
                         model = self.polymorphic_base.Meta.model
-                        prefetch_list = self.polymorphic_base._capabilities_prefetch
+                        prefetch_list = self.polymorphic_base.capabilities_prefetch
                     else:
                         model = self.Meta.model
                         prefetch_list = self.capabilities_prefetch
@@ -642,12 +640,9 @@ class EmptySerializer(serializers.Serializer):
 
 
 class UnifiedJobTemplateSerializer(BaseSerializer):
-    # As a base serializer, the capabilities prefetch is not used directly
-    _capabilities_prefetch = [
-        'admin', 'execute',
-        {'copy': ['jobtemplate.project.use', 'jobtemplate.inventory.use',
-                  'workflowjobtemplate.organization.workflow_admin']}
-    ]
+    # As a base serializer, the capabilities prefetch is not used directly,
+    # instead they are derived from the Workflow Job Template Serializer and the Job Template Serializer, respectively.
+    capabilities_prefetch = []
 
     class Meta:
         model = UnifiedJobTemplate
@@ -697,7 +692,7 @@ class UnifiedJobTemplateSerializer(BaseSerializer):
                 serializer.polymorphic_base = self
                 # capabilities prefetch is only valid for these models
                 if isinstance(obj, (JobTemplate, WorkflowJobTemplate)):
-                    serializer.capabilities_prefetch = self._capabilities_prefetch
+                    serializer.capabilities_prefetch = serializer_class.capabilities_prefetch
                 else:
                     serializer.capabilities_prefetch = None
             return serializer.to_representation(obj)
@@ -716,7 +711,7 @@ class UnifiedJobSerializer(BaseSerializer):
     class Meta:
         model = UnifiedJob
         fields = ('*', 'unified_job_template', 'launch_type', 'status',
-                  'failed', 'started', 'finished', 'elapsed', 'job_args',
+                  'failed', 'started', 'finished', 'canceled_on', 'elapsed', 'job_args',
                   'job_cwd', 'job_env', 'job_explanation',
                   'execution_node', 'controller_node',
                   'result_traceback', 'event_processing_finished')
@@ -808,7 +803,9 @@ class UnifiedJobSerializer(BaseSerializer):
                 td = now() - obj.started
                 ret['elapsed'] = (td.microseconds + (td.seconds + td.days * 24 * 3600) * 10 ** 6) / (10 ** 6 * 1.0)
             ret['elapsed'] = float(ret['elapsed'])
-
+        # Because this string is saved in the db in the source language,
+        # it must be marked for translation after it is pulled from the db, not when set
+        ret['job_explanation'] = _(obj.job_explanation)
         return ret
 
 
@@ -888,6 +885,9 @@ class UserSerializer(BaseSerializer):
         fields = ('*', '-name', '-description', '-modified',
                   'username', 'first_name', 'last_name',
                   'email', 'is_superuser', 'is_system_auditor', 'password', 'ldap_dn', 'last_login', 'external_account')
+        extra_kwargs = {
+            'last_login': {'read_only': True}
+        }
 
     def to_representation(self, obj):
         ret = super(UserSerializer, self).to_representation(obj)
@@ -1250,6 +1250,7 @@ class OrganizationSerializer(BaseSerializer):
         res.update(dict(
             projects    = self.reverse('api:organization_projects_list',       kwargs={'pk': obj.pk}),
             inventories = self.reverse('api:organization_inventories_list',    kwargs={'pk': obj.pk}),
+            job_templates = self.reverse('api:organization_job_templates_list', kwargs={'pk': obj.pk}),
             workflow_job_templates = self.reverse('api:organization_workflow_job_templates_list', kwargs={'pk': obj.pk}),
             users       = self.reverse('api:organization_users_list',          kwargs={'pk': obj.pk}),
             admins      = self.reverse('api:organization_admins_list',         kwargs={'pk': obj.pk}),
@@ -1261,9 +1262,11 @@ class OrganizationSerializer(BaseSerializer):
             notification_templates_started = self.reverse('api:organization_notification_templates_started_list', kwargs={'pk': obj.pk}),
             notification_templates_success = self.reverse('api:organization_notification_templates_success_list', kwargs={'pk': obj.pk}),
             notification_templates_error = self.reverse('api:organization_notification_templates_error_list', kwargs={'pk': obj.pk}),
+            notification_templates_approvals = self.reverse('api:organization_notification_templates_approvals_list', kwargs={'pk': obj.pk}),
             object_roles = self.reverse('api:organization_object_roles_list', kwargs={'pk': obj.pk}),
             access_list = self.reverse('api:organization_access_list', kwargs={'pk': obj.pk}),
             instance_groups = self.reverse('api:organization_instance_groups_list', kwargs={'pk': obj.pk}),
+            galaxy_credentials = self.reverse('api:organization_galaxy_credentials_list', kwargs={'pk': obj.pk}),
         ))
         return res
 
@@ -1277,6 +1280,14 @@ class OrganizationSerializer(BaseSerializer):
                     'job_templates': 0, 'admins': 0, 'projects': 0}
             else:
                 summary_dict['related_field_counts'] = counts_dict[obj.id]
+
+        # Organization participation roles (admin, member) can't be assigned
+        # to a team. This provides a hint to the ui so it can know to not
+        # display these roles for team role selection.
+        for key in ('admin_role', 'member_role',):
+            if key in summary_dict.get('object_roles', {}):
+                summary_dict['object_roles'][key]['user_only'] = True
+
         return summary_dict
 
     def validate(self, attrs):
@@ -1319,10 +1330,14 @@ class ProjectOptionsSerializer(BaseSerializer):
             scm_type = attrs.get('scm_type', u'') or u''
         if self.instance and not scm_type:
             valid_local_paths.append(self.instance.local_path)
+        if self.instance and scm_type and "local_path" in attrs and self.instance.local_path != attrs['local_path']:
+            errors['local_path'] = _(f'Cannot change local_path for {scm_type}-based projects')
         if scm_type:
             attrs.pop('local_path', None)
         if 'local_path' in attrs and attrs['local_path'] not in valid_local_paths:
             errors['local_path'] = _('This path is already being used by another manual project.')
+        if attrs.get('scm_branch') and scm_type == 'archive':
+            errors['scm_branch'] = _('SCM branch cannot be used with archive projects.')
         if attrs.get('scm_refspec') and scm_type != 'git':
             errors['scm_refspec'] = _('SCM refspec can only be used with git projects.')
 
@@ -1390,12 +1405,6 @@ class ProjectSerializer(UnifiedJobTemplateSerializer, ProjectOptionsSerializer):
         def get_field_from_model_or_attrs(fd):
             return attrs.get(fd, self.instance and getattr(self.instance, fd) or None)
 
-        organization = None
-        if 'organization' in attrs:
-            organization = attrs['organization']
-        elif self.instance:
-            organization = self.instance.organization
-
         if 'allow_override' in attrs and self.instance:
             # case where user is turning off this project setting
             if self.instance.allow_override and not attrs['allow_override']:
@@ -1411,11 +1420,7 @@ class ProjectSerializer(UnifiedJobTemplateSerializer, ProjectOptionsSerializer):
                             ' '.join([str(pk) for pk in used_by])
                         )})
 
-        view = self.context.get('view', None)
-        if not organization and not view.request.user.is_superuser:
-            # Only allow super users to create orgless projects
-            raise serializers.ValidationError(_('Organization is missing'))
-        elif get_field_from_model_or_attrs('scm_type') == '':
+        if get_field_from_model_or_attrs('scm_type') == '':
             for fd in ('scm_update_on_launch', 'scm_delete_on_update', 'scm_clean'):
                 if get_field_from_model_or_attrs(fd):
                     raise serializers.ValidationError({fd: _('Update options must be set to false for manual projects.')})
@@ -1469,7 +1474,7 @@ class ProjectUpdateSerializer(UnifiedJobSerializer, ProjectOptionsSerializer):
 
     class Meta:
         model = ProjectUpdate
-        fields = ('*', 'project', 'job_type', '-controller_node')
+        fields = ('*', 'project', 'job_type', 'job_tags', '-controller_node')
 
     def get_related(self, obj):
         res = super(ProjectUpdateSerializer, self).get_related(obj)
@@ -1545,20 +1550,15 @@ class InventorySerializer(BaseSerializerWithVariables):
         'admin', 'adhoc',
         {'copy': 'organization.inventory_admin'}
     ]
-    groups_with_active_failures = serializers.IntegerField(
-        read_only=True,
-        min_value=0,
-        help_text=_('This field has been deprecated and will be removed in a future release')
-    )
 
 
     class Meta:
         model = Inventory
         fields = ('*', 'organization', 'kind', 'host_filter', 'variables', 'has_active_failures',
                   'total_hosts', 'hosts_with_active_failures', 'total_groups',
-                  'groups_with_active_failures', 'has_inventory_sources',
-                  'total_inventory_sources', 'inventory_sources_with_failures',
-                  'insights_credential', 'pending_deletion',)
+                  'has_inventory_sources', 'total_inventory_sources',
+                  'inventory_sources_with_failures', 'insights_credential',
+                  'pending_deletion',)
 
     def get_related(self, obj):
         res = super(InventorySerializer, self).get_related(obj)
@@ -1608,7 +1608,7 @@ class InventorySerializer(BaseSerializerWithVariables):
                         })
                 SmartFilter().query_from_string(host_filter)
             except RuntimeError as e:
-                raise models.base.ValidationError(e)
+                raise models.base.ValidationError(str(e))
         return host_filter
 
     def validate(self, attrs):
@@ -1639,6 +1639,9 @@ class InventoryScriptSerializer(InventorySerializer):
 class HostSerializer(BaseSerializerWithVariables):
     show_capabilities = ['edit', 'delete']
     capabilities_prefetch = ['inventory.admin']
+
+    has_active_failures = serializers.SerializerMethodField()
+    has_inventory_sources = serializers.SerializerMethodField()
 
     class Meta:
         model = Host
@@ -1696,9 +1699,13 @@ class HostSerializer(BaseSerializerWithVariables):
         d.setdefault('recent_jobs', [{
             'id': j.job.id,
             'name': j.job.job_template.name if j.job.job_template is not None else "",
+            'type': j.job.job_type_name,
             'status': j.job.status,
             'finished': j.job.finished,
-        } for j in obj.job_host_summaries.select_related('job__job_template').order_by('-created')[:5]])
+        } for j in obj.job_host_summaries.select_related('job__job_template').order_by('-created').defer(
+            'job__extra_vars',
+            'job__artifacts',
+        )[:5]])
         return d
 
     def _get_host_port_from_name(self, name):
@@ -1730,6 +1737,7 @@ class HostSerializer(BaseSerializerWithVariables):
 
     def validate(self, attrs):
         name = force_text(attrs.get('name', self.instance and self.instance.name or ''))
+        inventory = attrs.get('inventory', self.instance and self.instance.inventory or '')
         host, port = self._get_host_port_from_name(name)
 
         if port:
@@ -1738,6 +1746,8 @@ class HostSerializer(BaseSerializerWithVariables):
             vars_dict = parse_yaml_or_json(variables)
             vars_dict['ansible_ssh_port'] = port
             attrs['variables'] = json.dumps(vars_dict)
+        if Group.objects.filter(name=name, inventory=inventory).exists():
+            raise serializers.ValidationError(_('A Group with that name already exists.'))
 
         return super(HostSerializer, self).validate(attrs)
 
@@ -1753,6 +1763,14 @@ class HostSerializer(BaseSerializerWithVariables):
             ret['last_job_host_summary'] = None
         return ret
 
+    def get_has_active_failures(self, obj):
+        return bool(
+            obj.last_job_host_summary and obj.last_job_host_summary.failed
+        )
+
+    def get_has_inventory_sources(self, obj):
+        return obj.inventory_sources.exists()
+
 
 class AnsibleFactsSerializer(BaseSerializer):
     class Meta:
@@ -1765,17 +1783,10 @@ class AnsibleFactsSerializer(BaseSerializer):
 class GroupSerializer(BaseSerializerWithVariables):
     show_capabilities = ['copy', 'edit', 'delete']
     capabilities_prefetch = ['inventory.admin', 'inventory.adhoc']
-    groups_with_active_failures = serializers.IntegerField(
-        read_only=True,
-        min_value=0,
-        help_text=_('This field has been deprecated and will be removed in a future release')
-    )
 
     class Meta:
         model = Group
-        fields = ('*', 'inventory', 'variables', 'has_active_failures',
-                  'total_hosts', 'hosts_with_active_failures', 'total_groups',
-                  'groups_with_active_failures', 'has_inventory_sources')
+        fields = ('*', 'inventory', 'variables')
 
     def build_relational_field(self, field_name, relation_info):
         field_class, field_kwargs = super(GroupSerializer, self).build_relational_field(field_name, relation_info)
@@ -1802,6 +1813,13 @@ class GroupSerializer(BaseSerializerWithVariables):
         if obj.inventory:
             res['inventory'] = self.reverse('api:inventory_detail', kwargs={'pk': obj.inventory.pk})
         return res
+
+    def validate(self, attrs):
+        name = force_text(attrs.get('name', self.instance and self.instance.name or ''))
+        inventory = attrs.get('inventory', self.instance and self.instance.inventory or '')
+        if Host.objects.filter(name=name, inventory=inventory).exists():
+            raise serializers.ValidationError(_('A Host with that name already exists.'))
+        return super(GroupSerializer, self).validate(attrs)
 
     def validate_name(self, value):
         if value in ('all', '_meta'):
@@ -1919,7 +1937,7 @@ class InventorySourceOptionsSerializer(BaseSerializer):
 
     class Meta:
         fields = ('*', 'source', 'source_path', 'source_script', 'source_vars', 'credential',
-                  'source_regions', 'instance_filters', 'group_by', 'overwrite', 'overwrite_vars',
+                  'enabled_var', 'enabled_value', 'host_filter', 'overwrite', 'overwrite_vars',
                   'custom_virtualenv', 'timeout', 'verbosity')
 
     def get_related(self, obj):
@@ -1934,12 +1952,12 @@ class InventorySourceOptionsSerializer(BaseSerializer):
     def validate_source_vars(self, value):
         ret = vars_validate_or_raise(value)
         for env_k in parse_yaml_or_json(value):
-            if env_k in settings.INV_ENV_VARIABLE_BLACKLIST:
+            if env_k in settings.INV_ENV_VARIABLE_BLOCKED:
                 raise serializers.ValidationError(_("`{}` is a prohibited environment variable".format(env_k)))
         return ret
 
     def validate(self, attrs):
-        # TODO: Validate source, validate source_regions
+        # TODO: Validate source
         errors = {}
 
         source = attrs.get('source', self.instance and self.instance.source or '')
@@ -2034,11 +2052,6 @@ class InventorySourceSerializer(UnifiedJobTemplateSerializer, InventorySourceOpt
             res['credentials'] = self.reverse('api:inventory_source_credentials_list', kwargs={'pk': obj.pk})
         return res
 
-    def get_group(self, obj):  # TODO: remove in 3.3
-        if obj.deprecated_group:
-            return obj.deprecated_group.id
-        return None
-
     def build_relational_field(self, field_name, relation_info):
         field_class, field_kwargs = super(InventorySourceSerializer, self).build_relational_field(field_name, relation_info)
         # SCM Project and inventory are read-only unless creating a new inventory.
@@ -2119,7 +2132,13 @@ class InventorySourceSerializer(UnifiedJobTemplateSerializer, InventorySourceOpt
         def get_field_from_model_or_attrs(fd):
             return attrs.get(fd, self.instance and getattr(self.instance, fd) or None)
 
-        if get_field_from_model_or_attrs('source') != 'scm':
+        if get_field_from_model_or_attrs('source') == 'scm':
+            if (('source' in attrs or 'source_project' in attrs) and
+                    get_field_from_model_or_attrs('source_project') is None):
+                raise serializers.ValidationError(
+                    {"source_project": _("Project required for scm type sources.")}
+                )
+        else:
             redundant_scm_fields = list(filter(
                 lambda x: attrs.get(x, None),
                 ['source_project', 'source_path', 'update_on_project_update']
@@ -2305,6 +2324,7 @@ class RoleSerializer(BaseSerializer):
             content_model = obj.content_type.model_class()
             ret['summary_fields']['resource_type'] = get_type_for_model(content_model)
             ret['summary_fields']['resource_type_display_name'] = content_model._meta.verbose_name.title()
+            ret['summary_fields']['resource_id'] = obj.object_id
 
         return ret
 
@@ -2453,12 +2473,18 @@ class CredentialTypeSerializer(BaseSerializer):
             raise PermissionDenied(
                 detail=_("Modifications not allowed for managed credential types")
             )
+
+        old_inputs = {}
+        if self.instance:
+            old_inputs = copy.deepcopy(self.instance.inputs)
+
+        ret = super(CredentialTypeSerializer, self).validate(attrs)
+
         if self.instance and self.instance.credentials.exists():
-            if 'inputs' in attrs and attrs['inputs'] != self.instance.inputs:
+            if 'inputs' in attrs and old_inputs != self.instance.inputs:
                 raise PermissionDenied(
                     detail= _("Modifications to inputs are not allowed for credential types that are in use")
                 )
-        ret = super(CredentialTypeSerializer, self).validate(attrs)
 
         if 'kind' in attrs and attrs['kind'] not in ('cloud', 'net'):
             raise serializers.ValidationError({
@@ -2510,10 +2536,11 @@ class CredentialTypeSerializer(BaseSerializer):
 class CredentialSerializer(BaseSerializer):
     show_capabilities = ['edit', 'delete', 'copy', 'use']
     capabilities_prefetch = ['admin', 'use']
+    managed_by_tower = serializers.ReadOnlyField()
 
     class Meta:
         model = Credential
-        fields = ('*', 'organization', 'credential_type', 'inputs', 'kind', 'cloud')
+        fields = ('*', 'organization', 'credential_type', 'managed_by_tower', 'inputs', 'kind', 'cloud', 'kubernetes')
         extra_kwargs = {
             'credential_type': {
                 'label': _('Credential Type'),
@@ -2577,12 +2604,30 @@ class CredentialSerializer(BaseSerializer):
 
         return summary_dict
 
+    def validate(self, attrs):
+        if self.instance and self.instance.managed_by_tower:
+            raise PermissionDenied(
+                detail=_("Modifications not allowed for managed credentials")
+            )
+        return super(CredentialSerializer, self).validate(attrs)
+
     def get_validation_exclusions(self, obj=None):
         ret = super(CredentialSerializer, self).get_validation_exclusions(obj)
         for field in ('credential_type', 'inputs'):
             if field in ret:
                 ret.remove(field)
         return ret
+
+    def validate_organization(self, org):
+        if (
+            self.instance and
+            self.instance.credential_type.kind == 'galaxy' and
+            org is None
+        ):
+            raise serializers.ValidationError(_(
+                "Galaxy credentials must be owned by an Organization."
+            ))
+        return org
 
     def validate_credential_type(self, credential_type):
         if self.instance and credential_type.pk != self.instance.credential_type.pk:
@@ -2634,11 +2679,28 @@ class CredentialSerializerCreate(CredentialSerializer):
                     owner_fields.add(field)
                 else:
                     attrs.pop(field)
+
         if not owner_fields:
             raise serializers.ValidationError({"detail": _("Missing 'user', 'team', or 'organization'.")})
 
+        if len(owner_fields) > 1:
+            received = ", ".join(sorted(owner_fields))
+            raise serializers.ValidationError({"detail": _(
+                "Only one of 'user', 'team', or 'organization' should be provided, "
+                "received {} fields.".format(received)
+            )})
+
         if attrs.get('team'):
             attrs['organization'] = attrs['team'].organization
+
+        if (
+            'credential_type' in attrs and
+            attrs['credential_type'].kind == 'galaxy' and
+            list(owner_fields) != ['organization']
+        ):
+            raise serializers.ValidationError({"organization": _(
+                "Galaxy credentials must be owned by an Organization."
+            )})
 
         return super(CredentialSerializerCreate, self).validate(attrs)
 
@@ -2730,7 +2792,8 @@ class JobOptionsSerializer(LabelsListMixin, BaseSerializer):
         fields = ('*', 'job_type', 'inventory', 'project', 'playbook', 'scm_branch',
                   'forks', 'limit', 'verbosity', 'extra_vars', 'job_tags',
                   'force_handlers', 'skip_tags', 'start_at_task', 'timeout',
-                  'use_fact_cache',)
+                  'use_fact_cache', 'organization',)
+        read_only_fields = ('organization',)
 
     def get_related(self, obj):
         res = super(JobOptionsSerializer, self).get_related(obj)
@@ -2745,17 +2808,14 @@ class JobOptionsSerializer(LabelsListMixin, BaseSerializer):
                 res['project'] = self.reverse('api:project_detail', kwargs={'pk': obj.project.pk})
         except ObjectDoesNotExist:
             setattr(obj, 'project', None)
+        if obj.organization_id:
+            res['organization'] = self.reverse('api:organization_detail', kwargs={'pk': obj.organization_id})
         if isinstance(obj, UnifiedJobTemplate):
-            res['extra_credentials'] = self.reverse(
-                'api:job_template_extra_credentials_list',
-                kwargs={'pk': obj.pk}
-            )
             res['credentials'] = self.reverse(
                 'api:job_template_credentials_list',
                 kwargs={'pk': obj.pk}
             )
         elif isinstance(obj, UnifiedJob):
-            res['extra_credentials'] = self.reverse('api:job_extra_credentials_list', kwargs={'pk': obj.pk})
             res['credentials'] = self.reverse('api:job_credentials_list', kwargs={'pk': obj.pk})
 
         return res
@@ -2813,9 +2873,9 @@ class JobTemplateMixin(object):
         # .only('id', 'status', 'finished', 'polymorphic_ctype_id')
         optimized_qs = uj_qs.non_polymorphic()
         return [{
-            'id': x.id, 'status': x.status, 'finished': x.finished,
+            'id': x.id, 'status': x.status, 'finished': x.finished, 'canceled_on': x.canceled_on,
             # Make type consistent with API top-level key, for instance workflow_job
-            'type': x.get_real_instance_class()._meta.verbose_name.replace(' ', '_')
+            'type': x.job_type_name
         } for x in optimized_qs[:10]]
 
     def get_summary_fields(self, obj):
@@ -2824,6 +2884,25 @@ class JobTemplateMixin(object):
             d['survey'] = dict(title=obj.survey_spec['name'], description=obj.survey_spec['description'])
         d['recent_jobs'] = self._recent_jobs(obj)
         return d
+
+    def validate(self, attrs):
+        webhook_service = attrs.get('webhook_service', getattr(self.instance, 'webhook_service', None))
+        webhook_credential = attrs.get('webhook_credential', getattr(self.instance, 'webhook_credential', None))
+
+        if webhook_credential:
+            if webhook_credential.credential_type.kind != 'token':
+                raise serializers.ValidationError({
+                    'webhook_credential': _("Must be a Personal Access Token."),
+                })
+
+            msg = {'webhook_credential': _("Must match the selected webhook service.")}
+            if webhook_service:
+                if webhook_credential.credential_type.namespace != '{}_token'.format(webhook_service):
+                    raise serializers.ValidationError(msg)
+            else:
+                raise serializers.ValidationError(msg)
+
+        return super().validate(attrs)
 
 
 class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobOptionsSerializer):
@@ -2837,32 +2916,45 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
 
     class Meta:
         model = JobTemplate
-        fields = ('*', 'host_config_key', 'ask_scm_branch_on_launch', 'ask_diff_mode_on_launch', 'ask_variables_on_launch',
-                  'ask_limit_on_launch', 'ask_tags_on_launch',
-                  'ask_skip_tags_on_launch', 'ask_job_type_on_launch', 'ask_verbosity_on_launch', 'ask_inventory_on_launch',
-                  'ask_credential_on_launch', 'survey_enabled', 'become_enabled', 'diff_mode',
-                  'allow_simultaneous', 'custom_virtualenv', 'job_slice_count')
+        fields = (
+            '*', 'host_config_key', 'ask_scm_branch_on_launch', 'ask_diff_mode_on_launch',
+            'ask_variables_on_launch', 'ask_limit_on_launch', 'ask_tags_on_launch',
+            'ask_skip_tags_on_launch', 'ask_job_type_on_launch', 'ask_verbosity_on_launch',
+            'ask_inventory_on_launch', 'ask_credential_on_launch', 'survey_enabled',
+            'become_enabled', 'diff_mode', 'allow_simultaneous', 'custom_virtualenv',
+            'job_slice_count', 'webhook_service', 'webhook_credential',
+        )
 
     def get_related(self, obj):
         res = super(JobTemplateSerializer, self).get_related(obj)
-        res.update(dict(
-            jobs = self.reverse('api:job_template_jobs_list', kwargs={'pk': obj.pk}),
-            schedules = self.reverse('api:job_template_schedules_list', kwargs={'pk': obj.pk}),
-            activity_stream = self.reverse('api:job_template_activity_stream_list', kwargs={'pk': obj.pk}),
-            launch = self.reverse('api:job_template_launch', kwargs={'pk': obj.pk}),
-            notification_templates_started = self.reverse('api:job_template_notification_templates_started_list', kwargs={'pk': obj.pk}),
-            notification_templates_success = self.reverse('api:job_template_notification_templates_success_list', kwargs={'pk': obj.pk}),
-            notification_templates_error = self.reverse('api:job_template_notification_templates_error_list', kwargs={'pk': obj.pk}),
-            access_list = self.reverse('api:job_template_access_list',      kwargs={'pk': obj.pk}),
-            survey_spec = self.reverse('api:job_template_survey_spec', kwargs={'pk': obj.pk}),
-            labels = self.reverse('api:job_template_label_list', kwargs={'pk': obj.pk}),
-            object_roles = self.reverse('api:job_template_object_roles_list', kwargs={'pk': obj.pk}),
-            instance_groups = self.reverse('api:job_template_instance_groups_list', kwargs={'pk': obj.pk}),
-            slice_workflow_jobs = self.reverse('api:job_template_slice_workflow_jobs_list', kwargs={'pk': obj.pk}),
-            copy = self.reverse('api:job_template_copy', kwargs={'pk': obj.pk}),
-        ))
+        res.update(
+            jobs=self.reverse('api:job_template_jobs_list', kwargs={'pk': obj.pk}),
+            schedules=self.reverse('api:job_template_schedules_list', kwargs={'pk': obj.pk}),
+            activity_stream=self.reverse('api:job_template_activity_stream_list', kwargs={'pk': obj.pk}),
+            launch=self.reverse('api:job_template_launch', kwargs={'pk': obj.pk}),
+            webhook_key=self.reverse('api:webhook_key', kwargs={'model_kwarg': 'job_templates', 'pk': obj.pk}),
+            webhook_receiver=(
+                self.reverse('api:webhook_receiver_{}'.format(obj.webhook_service),
+                             kwargs={'model_kwarg': 'job_templates', 'pk': obj.pk})
+                if obj.webhook_service else ''
+            ),
+            notification_templates_started=self.reverse('api:job_template_notification_templates_started_list', kwargs={'pk': obj.pk}),
+            notification_templates_success=self.reverse('api:job_template_notification_templates_success_list', kwargs={'pk': obj.pk}),
+            notification_templates_error=self.reverse('api:job_template_notification_templates_error_list', kwargs={'pk': obj.pk}),
+            access_list=self.reverse('api:job_template_access_list',      kwargs={'pk': obj.pk}),
+            survey_spec=self.reverse('api:job_template_survey_spec', kwargs={'pk': obj.pk}),
+            labels=self.reverse('api:job_template_label_list', kwargs={'pk': obj.pk}),
+            object_roles=self.reverse('api:job_template_object_roles_list', kwargs={'pk': obj.pk}),
+            instance_groups=self.reverse('api:job_template_instance_groups_list', kwargs={'pk': obj.pk}),
+            slice_workflow_jobs=self.reverse('api:job_template_slice_workflow_jobs_list', kwargs={'pk': obj.pk}),
+            copy=self.reverse('api:job_template_copy', kwargs={'pk': obj.pk}),
+        )
         if obj.host_config_key:
             res['callback'] = self.reverse('api:job_template_callback', kwargs={'pk': obj.pk})
+        if obj.organization_id:
+            res['organization'] = self.reverse('api:organization_detail',   kwargs={'pk': obj.organization_id})
+        if obj.webhook_credential_id:
+            res['webhook_credential'] = self.reverse('api:credential_detail', kwargs={'pk': obj.webhook_credential_id})
         return res
 
     def validate(self, attrs):
@@ -2888,12 +2980,10 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
     def validate_extra_vars(self, value):
         return vars_validate_or_raise(value)
 
-
     def get_summary_fields(self, obj):
         summary_fields = super(JobTemplateSerializer, self).get_summary_fields(obj)
         all_creds = []
         # Organize credential data into multitude of deprecated fields
-        extra_creds = []
         if obj.pk:
             for cred in obj.credentials.all():
                 summarized_cred = {
@@ -2904,10 +2994,6 @@ class JobTemplateSerializer(JobTemplateMixin, UnifiedJobTemplateSerializer, JobO
                     'cloud': cred.credential_type.kind == 'cloud'
                 }
                 all_creds.append(summarized_cred)
-                if cred.credential_type.kind in ('cloud', 'net'):
-                    extra_creds.append(summarized_cred)
-        if self.is_detail_view:
-            summary_fields['extra_credentials'] = extra_creds
         summary_fields['credentials'] = all_creds
         return summary_fields
 
@@ -2929,9 +3015,11 @@ class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
 
     class Meta:
         model = Job
-        fields = ('*', 'job_template', 'passwords_needed_to_start',
-                  'allow_simultaneous', 'artifacts', 'scm_revision',
-                  'instance_group', 'diff_mode', 'job_slice_number', 'job_slice_count')
+        fields = (
+            '*', 'job_template', 'passwords_needed_to_start', 'allow_simultaneous',
+            'artifacts', 'scm_revision', 'instance_group', 'diff_mode', 'job_slice_number',
+            'job_slice_count', 'webhook_service', 'webhook_credential', 'webhook_guid',
+        )
 
     def get_related(self, obj):
         res = super(JobSerializer, self).get_related(obj)
@@ -2980,7 +3068,6 @@ class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
         summary_fields = super(JobSerializer, self).get_summary_fields(obj)
         all_creds = []
         # Organize credential data into multitude of deprecated fields
-        extra_creds = []
         if obj.pk:
             for cred in obj.credentials.all():
                 summarized_cred = {
@@ -2991,10 +3078,6 @@ class JobSerializer(UnifiedJobSerializer, JobOptionsSerializer):
                     'cloud': cred.credential_type.kind == 'cloud'
                 }
                 all_creds.append(summarized_cred)
-                if cred.credential_type.kind in ('cloud', 'net'):
-                    extra_creds.append(summarized_cred)
-        if self.is_detail_view:
-            summary_fields['extra_credentials'] = extra_creds
         summary_fields['credentials'] = all_creds
         return summary_fields
 
@@ -3167,7 +3250,7 @@ class AdHocCommandSerializer(UnifiedJobSerializer):
             field_kwargs['choices'] = module_name_choices
             field_kwargs['required'] = bool(not module_name_default)
             field_kwargs['default'] = module_name_default or serializers.empty
-            field_kwargs['allow_blank'] = bool(module_name_default)
+            field_kwargs['allow_blank'] = False
             field_kwargs.pop('max_length', None)
         return field_class, field_kwargs
 
@@ -3314,35 +3397,72 @@ class WorkflowJobTemplateSerializer(JobTemplateMixin, LabelsListMixin, UnifiedJo
         'admin', 'execute',
         {'copy': 'organization.workflow_admin'}
     ]
+    limit = serializers.CharField(allow_blank=True, allow_null=True, required=False, default=None)
+    scm_branch = serializers.CharField(allow_blank=True, allow_null=True, required=False, default=None)
 
     class Meta:
         model = WorkflowJobTemplate
-        fields = ('*', 'extra_vars', 'organization', 'survey_enabled', 'allow_simultaneous',
-                  'ask_variables_on_launch', 'inventory', 'ask_inventory_on_launch',)
+        fields = (
+            '*', 'extra_vars', 'organization', 'survey_enabled', 'allow_simultaneous',
+            'ask_variables_on_launch', 'inventory', 'limit', 'scm_branch',
+            'ask_inventory_on_launch', 'ask_scm_branch_on_launch', 'ask_limit_on_launch',
+            'webhook_service', 'webhook_credential',
+        )
 
     def get_related(self, obj):
         res = super(WorkflowJobTemplateSerializer, self).get_related(obj)
-        res.update(dict(
+        res.update(
             workflow_jobs = self.reverse('api:workflow_job_template_jobs_list', kwargs={'pk': obj.pk}),
             schedules = self.reverse('api:workflow_job_template_schedules_list', kwargs={'pk': obj.pk}),
             launch = self.reverse('api:workflow_job_template_launch', kwargs={'pk': obj.pk}),
+            webhook_key=self.reverse('api:webhook_key', kwargs={'model_kwarg': 'workflow_job_templates', 'pk': obj.pk}),
+            webhook_receiver=(
+                self.reverse('api:webhook_receiver_{}'.format(obj.webhook_service),
+                             kwargs={'model_kwarg': 'workflow_job_templates', 'pk': obj.pk})
+                if obj.webhook_service else ''
+            ),
             workflow_nodes = self.reverse('api:workflow_job_template_workflow_nodes_list', kwargs={'pk': obj.pk}),
             labels = self.reverse('api:workflow_job_template_label_list', kwargs={'pk': obj.pk}),
             activity_stream = self.reverse('api:workflow_job_template_activity_stream_list', kwargs={'pk': obj.pk}),
             notification_templates_started = self.reverse('api:workflow_job_template_notification_templates_started_list', kwargs={'pk': obj.pk}),
             notification_templates_success = self.reverse('api:workflow_job_template_notification_templates_success_list', kwargs={'pk': obj.pk}),
             notification_templates_error = self.reverse('api:workflow_job_template_notification_templates_error_list', kwargs={'pk': obj.pk}),
+            notification_templates_approvals = self.reverse('api:workflow_job_template_notification_templates_approvals_list', kwargs={'pk': obj.pk}),
             access_list = self.reverse('api:workflow_job_template_access_list', kwargs={'pk': obj.pk}),
             object_roles = self.reverse('api:workflow_job_template_object_roles_list', kwargs={'pk': obj.pk}),
             survey_spec = self.reverse('api:workflow_job_template_survey_spec', kwargs={'pk': obj.pk}),
             copy = self.reverse('api:workflow_job_template_copy', kwargs={'pk': obj.pk}),
-        ))
+        )
         if obj.organization:
             res['organization'] = self.reverse('api:organization_detail',   kwargs={'pk': obj.organization.pk})
+        if obj.webhook_credential_id:
+            res['webhook_credential'] = self.reverse('api:credential_detail', kwargs={'pk': obj.webhook_credential_id})
+        if obj.inventory_id:
+            res['inventory'] = self.reverse(
+                'api:inventory_detail', kwargs={
+                    'pk': obj.inventory_id
+                }
+            )
         return res
 
     def validate_extra_vars(self, value):
         return vars_validate_or_raise(value)
+
+    def validate(self, attrs):
+        attrs = super(WorkflowJobTemplateSerializer, self).validate(attrs)
+
+        # process char_prompts, these are not direct fields on the model
+        mock_obj = self.Meta.model()
+        for field_name in ('scm_branch', 'limit'):
+            if field_name in attrs:
+                setattr(mock_obj, field_name, attrs[field_name])
+                attrs.pop(field_name)
+
+        # Model `.save` needs the container dict, not the pseudo fields
+        if mock_obj.char_prompts:
+            attrs['char_prompts'] = mock_obj.char_prompts
+
+        return attrs
 
 
 class WorkflowJobTemplateWithSpecSerializer(WorkflowJobTemplateSerializer):
@@ -3356,13 +3476,16 @@ class WorkflowJobTemplateWithSpecSerializer(WorkflowJobTemplateSerializer):
 
 
 class WorkflowJobSerializer(LabelsListMixin, UnifiedJobSerializer):
+    limit = serializers.CharField(allow_blank=True, allow_null=True, required=False, default=None)
+    scm_branch = serializers.CharField(allow_blank=True, allow_null=True, required=False, default=None)
 
     class Meta:
         model = WorkflowJob
-        fields = ('*', 'workflow_job_template', 'extra_vars', 'allow_simultaneous',
-                  'job_template', 'is_sliced_job',
-                  '-execution_node', '-event_processing_finished', '-controller_node',
-                  'inventory',)
+        fields = (
+            '*', 'workflow_job_template', 'extra_vars', 'allow_simultaneous', 'job_template',
+            'is_sliced_job', '-execution_node', '-event_processing_finished', '-controller_node',
+            'inventory', 'limit', 'scm_branch', 'webhook_service', 'webhook_credential', 'webhook_guid',
+        )
 
     def get_related(self, obj):
         res = super(WorkflowJobSerializer, self).get_related(obj)
@@ -3438,6 +3561,8 @@ class WorkflowApprovalSerializer(UnifiedJobSerializer):
                                                              kwargs={'pk': obj.workflow_approval_template.pk})
         res['approve'] = self.reverse('api:workflow_approval_approve', kwargs={'pk': obj.pk})
         res['deny'] = self.reverse('api:workflow_approval_deny', kwargs={'pk': obj.pk})
+        if obj.approved_or_denied_by:
+            res['approved_or_denied_by'] = self.reverse('api:user_detail', kwargs={'pk': obj.approved_or_denied_by.pk})
         return res
 
 
@@ -3469,7 +3594,7 @@ class WorkflowApprovalTemplateSerializer(UnifiedJobTemplateSerializer):
         if 'last_job' in res:
             del res['last_job']
 
-        res.update(dict(jobs = self.reverse('api:workflow_approval_template_jobs_list', kwargs={'pk': obj.pk}),))
+        res.update(jobs = self.reverse('api:workflow_approval_template_jobs_list', kwargs={'pk': obj.pk}))
         return res
 
 
@@ -3532,9 +3657,11 @@ class LaunchConfigurationBaseSerializer(BaseSerializer):
         elif self.instance:
             ujt = self.instance.unified_job_template
         if ujt is None:
-            if 'workflow_job_template' in attrs:
-                return {'workflow_job_template': attrs['workflow_job_template']}
-            return {}
+            ret = {}
+            for fd in ('workflow_job_template', 'identifier', 'all_parents_must_converge'):
+                if fd in attrs:
+                    ret[fd] = attrs[fd]
+            return ret
 
         # build additional field survey_passwords to track redacted variables
         password_dict = {}
@@ -3587,7 +3714,7 @@ class LaunchConfigurationBaseSerializer(BaseSerializer):
                         attrs.get('survey_passwords', {}).pop(key, None)
                     else:
                         errors.setdefault('extra_vars', []).append(
-                            _('"$encrypted$ is a reserved keyword, may not be used for {var_name}."'.format(key))
+                            _('"$encrypted$ is a reserved keyword, may not be used for {}."'.format(key))
                         )
 
         # Launch configs call extra_vars extra_data for historical reasons
@@ -3596,7 +3723,7 @@ class LaunchConfigurationBaseSerializer(BaseSerializer):
         if errors:
             raise serializers.ValidationError(errors)
 
-        # Model `.save` needs the container dict, not the psuedo fields
+        # Model `.save` needs the container dict, not the pseudo fields
         if mock_obj.char_prompts:
             attrs['char_prompts'] = mock_obj.char_prompts
 
@@ -3612,7 +3739,8 @@ class WorkflowJobTemplateNodeSerializer(LaunchConfigurationBaseSerializer):
     class Meta:
         model = WorkflowJobTemplateNode
         fields = ('*', 'workflow_job_template', '-name', '-description', 'id', 'url', 'related',
-                  'unified_job_template', 'success_nodes', 'failure_nodes', 'always_nodes',)
+                  'unified_job_template', 'success_nodes', 'failure_nodes', 'always_nodes', 'all_parents_must_converge',
+                  'identifier',)
 
     def get_related(self, obj):
         res = super(WorkflowJobTemplateNodeSerializer, self).get_related(obj)
@@ -3652,7 +3780,7 @@ class WorkflowJobNodeSerializer(LaunchConfigurationBaseSerializer):
         model = WorkflowJobNode
         fields = ('*', 'job', 'workflow_job', '-name', '-description', 'id', 'url', 'related',
                   'unified_job_template', 'success_nodes', 'failure_nodes', 'always_nodes',
-                  'do_not_run',)
+                  'all_parents_must_converge', 'do_not_run', 'identifier')
 
     def get_related(self, obj):
         res = super(WorkflowJobNodeSerializer, self).get_related(obj)
@@ -3760,7 +3888,7 @@ class JobEventSerializer(BaseSerializer):
         model = JobEvent
         fields = ('*', '-name', '-description', 'job', 'event', 'counter',
                   'event_display', 'event_data', 'event_level', 'failed',
-                  'changed', 'uuid', 'parent_uuid', 'host', 'host_name', 'parent',
+                  'changed', 'uuid', 'parent_uuid', 'host', 'host_name',
                   'playbook', 'play', 'task', 'role', 'stdout', 'start_line', 'end_line',
                   'verbosity')
 
@@ -3769,13 +3897,9 @@ class JobEventSerializer(BaseSerializer):
         res.update(dict(
             job = self.reverse('api:job_detail', kwargs={'pk': obj.job_id}),
         ))
-        if obj.parent_id:
-            res['parent'] = self.reverse('api:job_event_detail', kwargs={'pk': obj.parent_id})
         res['children'] = self.reverse('api:job_event_children_list', kwargs={'pk': obj.pk})
         if obj.host_id:
             res['host'] = self.reverse('api:host_detail', kwargs={'pk': obj.host_id})
-        if obj.hosts.exists():
-            res['hosts'] = self.reverse('api:job_event_hosts_list', kwargs={'pk': obj.pk})
         return res
 
     def get_summary_fields(self, obj):
@@ -3788,45 +3912,17 @@ class JobEventSerializer(BaseSerializer):
         return d
 
     def to_representation(self, obj):
-        ret = super(JobEventSerializer, self).to_representation(obj)
-        # Show full stdout for event detail view, truncate only for list view.
-        if hasattr(self.context.get('view', None), 'retrieve'):
-            return ret
+        data = super(JobEventSerializer, self).to_representation(obj)
         # Show full stdout for playbook_on_* events.
         if obj and obj.event.startswith('playbook_on'):
-            return ret
+            return data
+        # If the view logic says to not trunctate (request was to the detail view or a param was used)
+        if self.context.get('no_truncate', False):
+            return data
         max_bytes = settings.EVENT_STDOUT_MAX_BYTES_DISPLAY
-        if max_bytes > 0 and 'stdout' in ret and len(ret['stdout']) >= max_bytes:
-            ret['stdout'] = ret['stdout'][:(max_bytes - 1)] + u'\u2026'
-            set_count = 0
-            reset_count = 0
-            for m in ANSI_SGR_PATTERN.finditer(ret['stdout']):
-                if m.string[m.start():m.end()] == u'\u001b[0m':
-                    reset_count += 1
-                else:
-                    set_count += 1
-            ret['stdout'] += u'\u001b[0m' * (set_count - reset_count)
-        return ret
-
-
-class JobEventWebSocketSerializer(JobEventSerializer):
-    created = serializers.SerializerMethodField()
-    modified = serializers.SerializerMethodField()
-    event_name = serializers.CharField(source='event')
-    group_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = JobEvent
-        fields = ('*', 'event_name', 'group_name',)
-
-    def get_created(self, obj):
-        return obj.created.isoformat()
-
-    def get_modified(self, obj):
-        return obj.modified.isoformat()
-
-    def get_group_name(self, obj):
-        return 'job_events'
+        if 'stdout' in data:
+            data['stdout'] = truncate_stdout(data['stdout'], max_bytes)
+        return data
 
 
 class ProjectUpdateEventSerializer(JobEventSerializer):
@@ -3849,35 +3945,23 @@ class ProjectUpdateEventSerializer(JobEventSerializer):
         return UriCleaner.remove_sensitive(obj.stdout)
 
     def get_event_data(self, obj):
-        try:
-            return json.loads(
-                UriCleaner.remove_sensitive(
-                    json.dumps(obj.event_data)
+        # the project update playbook uses the git or svn modules
+        # to clone repositories, and those modules are prone to printing
+        # raw SCM URLs in their stdout (which *could* contain passwords)
+        # attempt to detect and filter HTTP basic auth passwords in the stdout
+        # of these types of events
+        if obj.event_data.get('task_action') in ('git', 'svn'):
+            try:
+                return json.loads(
+                    UriCleaner.remove_sensitive(
+                        json.dumps(obj.event_data)
+                    )
                 )
-            )
-        except Exception:
-            logger.exception("Failed to sanitize event_data")
-            return {}
-
-
-class ProjectUpdateEventWebSocketSerializer(ProjectUpdateEventSerializer):
-    created = serializers.SerializerMethodField()
-    modified = serializers.SerializerMethodField()
-    event_name = serializers.CharField(source='event')
-    group_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = ProjectUpdateEvent
-        fields = ('*', 'event_name', 'group_name',)
-
-    def get_created(self, obj):
-        return obj.created.isoformat()
-
-    def get_modified(self, obj):
-        return obj.modified.isoformat()
-
-    def get_group_name(self, obj):
-        return 'project_update_events'
+            except Exception:
+                logger.exception("Failed to sanitize event_data")
+                return {}
+        else:
+            return obj.event_data
 
 
 class AdHocCommandEventSerializer(BaseSerializer):
@@ -3901,42 +3985,14 @@ class AdHocCommandEventSerializer(BaseSerializer):
         return res
 
     def to_representation(self, obj):
-        ret = super(AdHocCommandEventSerializer, self).to_representation(obj)
-        # Show full stdout for event detail view, truncate only for list view.
-        if hasattr(self.context.get('view', None), 'retrieve'):
-            return ret
+        data = super(AdHocCommandEventSerializer, self).to_representation(obj)
+        # If the view logic says to not trunctate (request was to the detail view or a param was used)
+        if self.context.get('no_truncate', False):
+            return data
         max_bytes = settings.EVENT_STDOUT_MAX_BYTES_DISPLAY
-        if max_bytes > 0 and 'stdout' in ret and len(ret['stdout']) >= max_bytes:
-            ret['stdout'] = ret['stdout'][:(max_bytes - 1)] + u'\u2026'
-            set_count = 0
-            reset_count = 0
-            for m in ANSI_SGR_PATTERN.finditer(ret['stdout']):
-                if m.string[m.start():m.end()] == u'\u001b[0m':
-                    reset_count += 1
-                else:
-                    set_count += 1
-            ret['stdout'] += u'\u001b[0m' * (set_count - reset_count)
-        return ret
-
-
-class AdHocCommandEventWebSocketSerializer(AdHocCommandEventSerializer):
-    created = serializers.SerializerMethodField()
-    modified = serializers.SerializerMethodField()
-    event_name = serializers.CharField(source='event')
-    group_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = AdHocCommandEvent
-        fields = ('*', 'event_name', 'group_name',)
-
-    def get_created(self, obj):
-        return obj.created.isoformat()
-
-    def get_modified(self, obj):
-        return obj.modified.isoformat()
-
-    def get_group_name(self, obj):
-        return 'ad_hoc_command_events'
+        if 'stdout' in data:
+            data['stdout'] = truncate_stdout(data['stdout'], max_bytes)
+        return data
 
 
 class InventoryUpdateEventSerializer(AdHocCommandEventSerializer):
@@ -3954,26 +4010,6 @@ class InventoryUpdateEventSerializer(AdHocCommandEventSerializer):
         return res
 
 
-class InventoryUpdateEventWebSocketSerializer(InventoryUpdateEventSerializer):
-    created = serializers.SerializerMethodField()
-    modified = serializers.SerializerMethodField()
-    event_name = serializers.CharField(source='event')
-    group_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = InventoryUpdateEvent
-        fields = ('*', 'event_name', 'group_name',)
-
-    def get_created(self, obj):
-        return obj.created.isoformat()
-
-    def get_modified(self, obj):
-        return obj.modified.isoformat()
-
-    def get_group_name(self, obj):
-        return 'inventory_update_events'
-
-
 class SystemJobEventSerializer(AdHocCommandEventSerializer):
 
     class Meta:
@@ -3987,26 +4023,6 @@ class SystemJobEventSerializer(AdHocCommandEventSerializer):
             'api:system_job_detail', kwargs={'pk': obj.system_job_id}
         )
         return res
-
-
-class SystemJobEventWebSocketSerializer(SystemJobEventSerializer):
-    created = serializers.SerializerMethodField()
-    modified = serializers.SerializerMethodField()
-    event_name = serializers.CharField(source='event')
-    group_name = serializers.SerializerMethodField()
-
-    class Meta:
-        model = SystemJobEvent
-        fields = ('*', 'event_name', 'group_name',)
-
-    def get_created(self, obj):
-        return obj.created.isoformat()
-
-    def get_modified(self, obj):
-        return obj.modified.isoformat()
-
-    def get_group_name(self, obj):
-        return 'system_job_events'
 
 
 class JobLaunchSerializer(BaseSerializer):
@@ -4103,6 +4119,13 @@ class JobLaunchSerializer(BaseSerializer):
             **attrs)
         self._ignored_fields = rejected
 
+        # Basic validation - cannot run a playbook without a playbook
+        if not template.project:
+            errors['project'] = _("A project is required to run a job.")
+        elif template.project.status in ('error', 'failed'):
+            errors['playbook'] = _("Missing a revision to run due to failed project update.")
+
+        # cannot run a playbook without an inventory
         if template.inventory and template.inventory.pending_deletion is True:
             errors['inventory'] = _("The inventory associated with this Job Template is being deleted.")
         elif 'inventory' in accepted and accepted['inventory'].pending_deletion:
@@ -4116,7 +4139,8 @@ class JobLaunchSerializer(BaseSerializer):
                 errors.setdefault('credentials', []).append(_(
                     'Cannot assign multiple {} credentials.'
                 ).format(cred.unique_hash(display=True)))
-            if cred.credential_type.kind not in ('ssh', 'vault', 'cloud', 'net'):
+            if cred.credential_type.kind not in ('ssh', 'vault', 'cloud',
+                                                 'net', 'kubernetes'):
                 errors.setdefault('credentials', []).append(_(
                     'Cannot assign a Credential of kind `{}`'
                 ).format(cred.credential_type.kind))
@@ -4138,7 +4162,10 @@ class JobLaunchSerializer(BaseSerializer):
         # verify that credentials (either provided or existing) don't
         # require launch-time passwords that have not been provided
         if 'credentials' in accepted:
-            launch_credentials = accepted['credentials']
+            launch_credentials = Credential.unique_dict(
+                list(template_credentials.all()) +
+                list(accepted['credentials'])
+            ).values()
         else:
             launch_credentials = template_credentials
         passwords = attrs.get('credential_passwords', {})  # get from original attrs
@@ -4180,12 +4207,16 @@ class WorkflowJobLaunchSerializer(BaseSerializer):
         queryset=Inventory.objects.all(),
         required=False, write_only=True
     )
+    limit = serializers.CharField(required=False, write_only=True, allow_blank=True)
+    scm_branch = serializers.CharField(required=False, write_only=True, allow_blank=True)
     workflow_job_template_data = serializers.SerializerMethodField()
 
     class Meta:
         model = WorkflowJobTemplate
-        fields = ('ask_inventory_on_launch', 'can_start_without_user_input', 'defaults', 'extra_vars',
-                  'inventory', 'survey_enabled', 'variables_needed_to_start',
+        fields = ('ask_inventory_on_launch', 'ask_limit_on_launch', 'ask_scm_branch_on_launch',
+                  'can_start_without_user_input', 'defaults', 'extra_vars',
+                  'inventory', 'limit', 'scm_branch',
+                  'survey_enabled', 'variables_needed_to_start',
                   'node_templates_missing', 'node_prompts_rejected',
                   'workflow_job_template_data', 'survey_enabled', 'ask_variables_on_launch')
         read_only_fields = ('ask_inventory_on_launch', 'ask_variables_on_launch')
@@ -4225,9 +4256,14 @@ class WorkflowJobLaunchSerializer(BaseSerializer):
 
         WFJT_extra_vars = template.extra_vars
         WFJT_inventory = template.inventory
+        WFJT_limit = template.limit
+        WFJT_scm_branch = template.scm_branch
         super(WorkflowJobLaunchSerializer, self).validate(attrs)
         template.extra_vars = WFJT_extra_vars
         template.inventory = WFJT_inventory
+        template.limit = WFJT_limit
+        template.scm_branch = WFJT_scm_branch
+
         return accepted
 
 
@@ -4279,13 +4315,30 @@ class NotificationTemplateSerializer(BaseSerializer):
         error_list = []
         collected_messages = []
 
+        def check_messages(messages):
+            for message_type in messages:
+                if message_type not in ('message', 'body'):
+                    error_list.append(_("Message type '{}' invalid, must be either 'message' or 'body'").format(message_type))
+                    continue
+                message = messages[message_type]
+                if message is None:
+                    continue
+                if not isinstance(message, str):
+                    error_list.append(_("Expected string for '{}', found {}, ").format(message_type, type(message)))
+                    continue
+                if message_type == 'message':
+                    if '\n' in message:
+                        error_list.append(_("Messages cannot contain newlines (found newline in {} event)".format(event)))
+                        continue
+                collected_messages.append(message)
+
         # Validate structure / content types
         if not isinstance(messages, dict):
             error_list.append(_("Expected dict for 'messages' field, found {}".format(type(messages))))
         else:
             for event in messages:
-                if event not in ['started', 'success', 'error']:
-                    error_list.append(_("Event '{}' invalid, must be one of 'started', 'success', or 'error'").format(event))
+                if event not in ('started', 'success', 'error', 'workflow_approval'):
+                    error_list.append(_("Event '{}' invalid, must be one of 'started', 'success', 'error', or 'workflow_approval'").format(event))
                     continue
                 event_messages = messages[event]
                 if event_messages is None:
@@ -4293,21 +4346,21 @@ class NotificationTemplateSerializer(BaseSerializer):
                 if not isinstance(event_messages, dict):
                     error_list.append(_("Expected dict for event '{}', found {}").format(event, type(event_messages)))
                     continue
-                for message_type in event_messages:
-                    if message_type not in ['message', 'body']:
-                        error_list.append(_("Message type '{}' invalid, must be either 'message' or 'body'").format(message_type))
-                        continue
-                    message = event_messages[message_type]
-                    if message is None:
-                        continue
-                    if not isinstance(message, str):
-                        error_list.append(_("Expected string for '{}', found {}, ").format(message_type, type(message)))
-                        continue
-                    if message_type == 'message':
-                        if '\n' in message:
-                            error_list.append(_("Messages cannot contain newlines (found newline in {} event)".format(event)))
+                if event == 'workflow_approval':
+                    for subevent in event_messages:
+                        if subevent not in ('running', 'approved', 'timed_out', 'denied'):
+                            error_list.append(_("Workflow Approval event '{}' invalid, must be one of "
+                                                "'running', 'approved', 'timed_out', or 'denied'").format(subevent))
                             continue
-                    collected_messages.append(message)
+                        subevent_messages = event_messages[subevent]
+                        if subevent_messages is None:
+                            continue
+                        if not isinstance(subevent_messages, dict):
+                            error_list.append(_("Expected dict for workflow approval event '{}', found {}").format(subevent, type(subevent_messages)))
+                            continue
+                        check_messages(subevent_messages)
+                else:
+                    check_messages(event_messages)
 
         # Subclass to return name of undefined field
         class DescriptiveUndefined(StrictUndefined):
@@ -4346,6 +4399,8 @@ class NotificationTemplateSerializer(BaseSerializer):
         if notification_type == 'webhook':
             for event in messages:
                 if not messages[event]:
+                    continue
+                if not isinstance(messages[event], dict):
                     continue
                 body = messages[event].get('body', {})
                 if body:
@@ -4436,8 +4491,18 @@ class NotificationSerializer(BaseSerializer):
                   'notification_type', 'recipients', 'subject', 'body')
 
     def get_body(self, obj):
-        if obj.notification_type == 'webhook' and 'body' in obj.body:
-            return obj.body['body']
+        if obj.notification_type in ('webhook', 'pagerduty'):
+            if isinstance(obj.body, dict):
+                if 'body' in obj.body:
+                    return obj.body['body']
+            elif isinstance(obj.body, str):
+                # attempt to load json string
+                try:
+                    potential_body = json.loads(obj.body)
+                    if isinstance(potential_body, dict):
+                        return potential_body
+                except json.JSONDecodeError:
+                    pass
         return obj.body
 
     def get_related(self, obj):
@@ -4529,6 +4594,8 @@ class SchedulePreviewSerializer(BaseSerializer):
         try:
             Schedule.rrulestr(rrule_value)
         except Exception as e:
+            import traceback
+            logger.error(traceback.format_exc())
             raise serializers.ValidationError(_("rrule parsing failed validation: {}").format(e))
         return value
 
@@ -4570,6 +4637,10 @@ class ScheduleSerializer(LaunchConfigurationBaseSerializer, SchedulePreviewSeria
 
     def get_summary_fields(self, obj):
         summary_fields = super(ScheduleSerializer, self).get_summary_fields(obj)
+
+        if isinstance(obj.unified_job_template, SystemJobTemplate):
+            summary_fields['unified_job_template']['job_type'] = obj.unified_job_template.job_type
+
         if 'inventory' in summary_fields:
             return summary_fields
 
@@ -4636,6 +4707,8 @@ class InstanceSerializer(BaseSerializer):
 
 class InstanceGroupSerializer(BaseSerializer):
 
+    show_capabilities = ['edit', 'delete']
+
     committed_capacity = serializers.SerializerMethodField()
     consumed_capacity = serializers.SerializerMethodField()
     percent_capacity_remaining = serializers.SerializerMethodField()
@@ -4656,6 +4729,11 @@ class InstanceGroupSerializer(BaseSerializer):
     is_isolated = serializers.BooleanField(
         help_text=_('Indicates whether instances in this group are isolated.'
                     'Isolated groups have a designated controller group.'),
+        read_only=True
+    )
+    is_containerized = serializers.BooleanField(
+        help_text=_('Indicates whether instances in this group are containerized.'
+                    'Containerized groups have a designated Openshift or Kubernetes cluster.'),
         read_only=True
     )
     # NOTE: help_text is duplicated from field definitions, no obvious way of
@@ -4683,8 +4761,9 @@ class InstanceGroupSerializer(BaseSerializer):
         fields = ("id", "type", "url", "related", "name", "created", "modified",
                   "capacity", "committed_capacity", "consumed_capacity",
                   "percent_capacity_remaining", "jobs_running", "jobs_total",
-                  "instances", "controller", "is_controller", "is_isolated",
-                  "policy_instance_percentage", "policy_instance_minimum", "policy_instance_list")
+                  "instances", "controller", "is_controller", "is_isolated", "is_containerized", "credential",
+                  "policy_instance_percentage", "policy_instance_minimum", "policy_instance_list",
+                  "pod_spec_override", "summary_fields")
 
     def get_related(self, obj):
         res = super(InstanceGroupSerializer, self).get_related(obj)
@@ -4692,6 +4771,9 @@ class InstanceGroupSerializer(BaseSerializer):
         res['instances'] = self.reverse('api:instance_group_instance_list', kwargs={'pk': obj.pk})
         if obj.controller_id:
             res['controller'] = self.reverse('api:instance_group_detail', kwargs={'pk': obj.controller_id})
+        if obj.credential:
+            res['credential'] = self.reverse('api:credential_detail', kwargs={'pk': obj.credential_id})
+
         return res
 
     def validate_policy_instance_list(self, value):
@@ -4704,11 +4786,28 @@ class InstanceGroupSerializer(BaseSerializer):
                 raise serializers.ValidationError(_('Isolated instances may not be added or removed from instances groups via the API.'))
             if self.instance and self.instance.controller_id is not None:
                 raise serializers.ValidationError(_('Isolated instance group membership may not be managed via the API.'))
+        if value and self.instance and self.instance.is_containerized:
+            raise serializers.ValidationError(_('Containerized instances may not be managed via the API'))
+        return value
+
+    def validate_policy_instance_percentage(self, value):
+        if value and self.instance and self.instance.is_containerized:
+            raise serializers.ValidationError(_('Containerized instances may not be managed via the API'))
+        return value
+
+    def validate_policy_instance_minimum(self, value):
+        if value and self.instance and self.instance.is_containerized:
+            raise serializers.ValidationError(_('Containerized instances may not be managed via the API'))
         return value
 
     def validate_name(self, value):
         if self.instance and self.instance.name == 'tower' and value != 'tower':
             raise serializers.ValidationError(_('tower instance group name may not be changed.'))
+        return value
+
+    def validate_credential(self, value):
+        if value and not value.kubernetes:
+            raise serializers.ValidationError(_('Only Kubernetes credentials can be associated with an Instance Group'))
         return value
 
     def get_capacity_dict(self):

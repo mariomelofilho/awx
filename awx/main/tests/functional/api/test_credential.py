@@ -61,6 +61,36 @@ def test_credential_validation_error_with_bad_user(post, admin, credentialtype_s
 
 
 @pytest.mark.django_db
+def test_credential_validation_error_with_no_owner_field(post, admin, credentialtype_ssh):
+    params = {
+        'credential_type': credentialtype_ssh.id,
+        'inputs': {'username': 'someusername'},
+        'name': 'Some name',
+    }
+    response = post(reverse('api:credential_list'), params, admin)
+    assert response.status_code == 400
+    assert response.data['detail'][0] == "Missing 'user', 'team', or 'organization'."
+
+
+@pytest.mark.django_db
+def test_credential_validation_error_with_multiple_owner_fields(post, admin, alice, team, organization, credentialtype_ssh):
+    params = {
+        'credential_type': credentialtype_ssh.id,
+        'inputs': {'username': 'someusername'},
+        'team': team.id,
+        'user': alice.id,
+        'organization': organization.id,
+        'name': 'Some name',
+    }
+    response = post(reverse('api:credential_list'), params, admin)
+    assert response.status_code == 400
+    assert response.data['detail'][0] == (
+        "Only one of 'user', 'team', or 'organization' should be provided, "
+        "received organization, team, user fields."
+    )
+
+
+@pytest.mark.django_db
 def test_create_user_credential_via_user_credentials_list(post, get, alice, credentialtype_ssh):
     params = {
         'credential_type': 1,
@@ -496,9 +526,6 @@ def test_falsey_field_data(get, post, organization, admin, field_value):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize('kind, extraneous', [
-    ['ssh', 'ssh_key_unlock'],
-    ['scm', 'ssh_key_unlock'],
-    ['net', 'ssh_key_unlock'],
     ['net', 'authorize_password'],
 ])
 def test_field_dependencies(get, post, organization, admin, kind, extraneous):
@@ -646,33 +673,6 @@ def test_net_create_ok(post, organization, admin):
     assert decrypt_field(cred, 'ssh_key_unlock') == 'some_key_unlock'
     assert decrypt_field(cred, 'authorize_password') == 'some_authorize_password'
     assert cred.inputs['authorize'] is True
-
-
-#
-# Cloudforms Credentials
-#
-@pytest.mark.django_db
-def test_cloudforms_create_ok(post, organization, admin):
-    params = {
-        'credential_type': 1,
-        'name': 'Best credential ever',
-        'inputs': {
-            'host': 'some_host',
-            'username': 'some_username',
-            'password': 'some_password',
-        }
-    }
-    cloudforms = CredentialType.defaults['cloudforms']()
-    cloudforms.save()
-    params['organization'] = organization.id
-    response = post(reverse('api:credential_list'), params, admin)
-    assert response.status_code == 201
-
-    assert Credential.objects.count() == 1
-    cred = Credential.objects.all()[:1].get()
-    assert cred.inputs['host'] == 'some_host'
-    assert cred.inputs['username'] == 'some_username'
-    assert decrypt_field(cred, 'password') == 'some_password'
 
 
 #
@@ -975,7 +975,7 @@ def test_field_removal(put, organization, admin, credentialtype_ssh):
     ['insights_inventories', Inventory()],
     ['unifiedjobs', Job()],
     ['unifiedjobtemplates', JobTemplate()],
-    ['unifiedjobtemplates', InventorySource()],
+    ['unifiedjobtemplates', InventorySource(source='ec2')],
     ['projects', Project()],
     ['workflowjobnodes', WorkflowJobNode()],
 ])
@@ -1124,6 +1124,22 @@ def test_cloud_credential_type_mutability(patch, organization, admin, credential
     jt.delete()
     response = _change_credential_type()
     assert response.status_code == 200
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('field', ['password', 'ssh_key_data'])
+def test_secret_fields_cannot_be_special_encrypted_variable(post, organization, admin, credentialtype_ssh, field):
+    params = {
+        'name': 'Best credential ever',
+        'credential_type': credentialtype_ssh.id,
+        'inputs': {
+            'username': 'joe',
+            field: '$encrypted$',
+        },
+        'organization': organization.id,
+    }
+    response = post(reverse('api:credential_list'), params, admin, status=400)
+    assert str(response.data['inputs'][0]) == f'$encrypted$ is a reserved keyword, and cannot be used for {field}.'
 
 
 @pytest.mark.django_db
@@ -1442,3 +1458,15 @@ def test_create_credential_with_invalid_url_xfail(post, organization, admin, url
     assert response.status_code == status
     if status != 201:
         assert response.data['inputs']['server_url'] == [msg]
+
+
+@pytest.mark.django_db
+def test_external_credential_rbac_test_endpoint(post, alice, external_credential):
+    url = reverse('api:credential_external_test', kwargs={'pk': external_credential.pk})
+    data = {'metadata': {'key': 'some_key'}}
+
+    external_credential.read_role.members.add(alice)
+    assert post(url, data, alice).status_code == 403
+
+    external_credential.use_role.members.add(alice)
+    assert post(url, data, alice).status_code == 202

@@ -6,7 +6,7 @@ REPLACE_STR = '$encrypted$'
 
 class UriCleaner(object):
     REPLACE_STR = REPLACE_STR
-    SENSITIVE_URI_PATTERN = re.compile(r'(\w+:(\/?\/?)[^\s]+)', re.MULTILINE)  # NOQA
+    SENSITIVE_URI_PATTERN = re.compile(r'(\w{1,20}:(\/?\/?)[^\s]+)', re.MULTILINE)  # NOQA
 
     @staticmethod
     def remove_sensitive(cleartext):
@@ -16,8 +16,8 @@ class UriCleaner(object):
             match = UriCleaner.SENSITIVE_URI_PATTERN.search(redactedtext, text_index)
             if not match:
                 break
+            uri_str = match.group(1)
             try:
-                uri_str = match.group(1)
                 # May raise a ValueError if invalid URI for one reason or another
                 o = urlparse.urlsplit(uri_str)
 

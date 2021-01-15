@@ -14,6 +14,8 @@ from awx.api.views import (
     ApiV2RootView,
     ApiV2PingView,
     ApiV2ConfigView,
+    ApiV2SubscriptionView,
+    ApiV2AttachView,
     AuthView,
     UserMeList,
     DashboardView,
@@ -22,9 +24,7 @@ from awx.api.views import (
     UnifiedJobList,
     HostAnsibleFactsDetail,
     JobCredentialsList,
-    JobExtraCredentialsList,
     JobTemplateCredentialsList,
-    JobTemplateExtraCredentialsList,
     SchedulePreview,
     ScheduleZoneInfo,
     OAuth2ApplicationList,
@@ -33,7 +33,9 @@ from awx.api.views import (
     OAuth2ApplicationDetail,
 )
 
-from awx.api.views.metrics import MetricsView
+from awx.api.views.metrics import (
+    MetricsView,
+)
 
 from .organization import urls as organization_urls
 from .user import urls as user_urls
@@ -80,9 +82,7 @@ v2_urls = [
     url(r'^credential_types/', include(credential_type_urls)),
     url(r'^credential_input_sources/', include(credential_input_source_urls)),
     url(r'^hosts/(?P<pk>[0-9]+)/ansible_facts/$', HostAnsibleFactsDetail.as_view(), name='host_ansible_facts_detail'),
-    url(r'^jobs/(?P<pk>[0-9]+)/extra_credentials/$', JobExtraCredentialsList.as_view(), name='job_extra_credentials_list'),
     url(r'^jobs/(?P<pk>[0-9]+)/credentials/$', JobCredentialsList.as_view(), name='job_credentials_list'),
-    url(r'^job_templates/(?P<pk>[0-9]+)/extra_credentials/$', JobTemplateExtraCredentialsList.as_view(), name='job_template_extra_credentials_list'),
     url(r'^job_templates/(?P<pk>[0-9]+)/credentials/$', JobTemplateCredentialsList.as_view(), name='job_template_credentials_list'),
     url(r'^schedules/preview/$', SchedulePreview.as_view(), name='schedule_rrule'),
     url(r'^schedules/zoneinfo/$', ScheduleZoneInfo.as_view(), name='schedule_zoneinfo'),
@@ -94,6 +94,8 @@ v2_urls = [
     url(r'^metrics/$', MetricsView.as_view(), name='metrics_view'),
     url(r'^ping/$', ApiV2PingView.as_view(), name='api_v2_ping_view'),
     url(r'^config/$', ApiV2ConfigView.as_view(), name='api_v2_config_view'),
+    url(r'^config/subscriptions/$', ApiV2SubscriptionView.as_view(), name='api_v2_subscription_view'),
+    url(r'^config/attach/$', ApiV2AttachView.as_view(), name='api_v2_attach_view'),
     url(r'^auth/$', AuthView.as_view()),
     url(r'^me/$', UserMeList.as_view(), name='user_me_list'),
     url(r'^dashboard/$', DashboardView.as_view(), name='dashboard_view'),

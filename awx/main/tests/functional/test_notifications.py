@@ -43,7 +43,7 @@ def test_basic_parameterization(get, post, user, organization):
     assert 'url' in response.data['notification_configuration']
     assert 'headers' in response.data['notification_configuration']
     assert 'messages' in response.data
-    assert response.data['messages'] == {'started': None, 'success': None, 'error': None}
+    assert response.data['messages'] == {'started': None, 'success': None, 'error': None, 'workflow_approval': None}
 
 
 @pytest.mark.django_db
@@ -90,7 +90,7 @@ def test_inherited_notification_templates(get, post, user, organization, project
         notification_templates.append(response.data['id'])
     i = Inventory.objects.create(name='test', organization=organization)
     i.save()
-    isrc = InventorySource.objects.create(name='test', inventory=i)
+    isrc = InventorySource.objects.create(name='test', inventory=i, source='ec2')
     isrc.save()
     jt = JobTemplate.objects.create(name='test', inventory=i, project=project, playbook='debug.yml')
     jt.save()

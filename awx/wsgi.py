@@ -29,15 +29,12 @@ if MODE == 'production':
     try:
         fd = open("/var/lib/awx/.tower_version", "r")
         if fd.read().strip() != tower_version:
-            raise Exception()
-    except Exception:
+            raise ValueError()
+    except FileNotFoundError:
+        pass
+    except ValueError as e:
         logger.error("Missing or incorrect metadata for Tower version.  Ensure Tower was installed using the setup playbook.")
-        raise Exception("Missing or incorrect metadata for Tower version.  Ensure Tower was installed using the setup playbook.")
-
-if social_django.__version__ != '2.1.0':
-    raise RuntimeError("social_django version other than 2.1.0 detected {}. \
-            Confirm that per-request social_django.utils.BACKENDS override \
-            still works".format(social_django.__version__))
+        raise Exception("Missing or incorrect metadata for Tower version.  Ensure Tower was installed using the setup playbook.") from e
 
 
 # Return the default Django WSGI application.

@@ -54,7 +54,9 @@ def test_no_changing_overwrite_behavior_if_used(post, patch, organization, admin
         data={
             'name': 'fooo',
             'organization': organization.id,
-            'allow_override': True
+            'allow_override': True,
+            'scm_type': 'git',
+            'scm_url': 'https://github.com/ansible/test-playbooks.git'
         },
         user=admin_user,
         expect=201
@@ -83,7 +85,9 @@ def test_changing_overwrite_behavior_okay_if_not_used(post, patch, organization,
         data={
             'name': 'fooo',
             'organization': organization.id,
-            'allow_override': True
+            'allow_override': True,
+            'scm_type': 'git',
+            'scm_url': 'https://github.com/ansible/test-playbooks.git'
         },
         user=admin_user,
         expect=201
@@ -95,3 +99,12 @@ def test_changing_overwrite_behavior_okay_if_not_used(post, patch, organization,
         expect=200
     )
     assert Project.objects.get(pk=r1.data['id']).allow_override is False
+
+
+@pytest.mark.django_db
+def test_scm_project_local_path_invalid(get, patch, project, admin):
+    url = reverse('api:project_detail', kwargs={'pk': project.id})
+    resp = patch(url, {'local_path': '/foo/bar'}, user=admin, expect=400)
+    assert resp.data['local_path'] == [
+        'Cannot change local_path for git-based projects'
+    ]

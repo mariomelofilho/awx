@@ -12,6 +12,7 @@ from awx.api.serializers import UnifiedJobSerializer
 
 class TestJobNotificationMixin(object):
     CONTEXT_STRUCTURE = {'job': {'allow_simultaneous': bool,
+                                 'artifacts': {},
                                  'custom_virtualenv': str,
                                  'controller_node': str,
                                  'created': datetime.datetime,
@@ -23,8 +24,11 @@ class TestJobNotificationMixin(object):
                                  'finished': bool,
                                  'force_handlers': bool,
                                  'forks': int,
-                                 'host_status_counts': {'skipped': int, 'ok': int, 'changed': int,
-                                                        'failures': int, 'dark': int},
+                                 'host_status_counts': {
+                                     'skipped': int, 'ok': int, 'changed': int,
+                                     'failures': int, 'dark': int, 'processed': int,
+                                     'rescued': int, 'failed': bool
+                                 },
                                  'id': int,
                                  'job_explanation': str,
                                  'job_slice_count': int,
@@ -36,7 +40,7 @@ class TestJobNotificationMixin(object):
                                  'modified': datetime.datetime,
                                  'name': str,
                                  'playbook': str,
-                                 'playbook_counts': {'play_count': int, 'task_count': int},
+                                 'scm_branch': str,
                                  'scm_revision': str,
                                  'skip_tags': str,
                                  'start_at_task': str,
@@ -48,7 +52,6 @@ class TestJobNotificationMixin(object):
                                                                    'username': str},
                                                     'instance_group': {'id': int, 'name': str},
                                                     'inventory': {'description': str,
-                                                                  'groups_with_active_failures': int,
                                                                   'has_active_failures': bool,
                                                                   'has_inventory_sources': bool,
                                                                   'hosts_with_active_failures': int,
@@ -69,17 +72,10 @@ class TestJobNotificationMixin(object):
                                                                 'name': str,
                                                                 'scm_type': str,
                                                                 'status': str},
-                                                    'project_update': {'id': int, 'name': str, 'description': str, 'status': str, 'failed': bool},
                                                     'unified_job_template': {'description': str,
                                                                              'id': int,
                                                                              'name': str,
-                                                                             'unified_job_type': str},
-                                                    'source_workflow_job': {'description': str,
-                                                                            'elapsed': float,
-                                                                            'failed': bool,
-                                                                            'id': int,
-                                                                            'name': str,
-                                                                            'status': str}},
+                                                                             'unified_job_type': str}},
 
                                  'timeout': int,
                                  'type': str,
@@ -87,7 +83,10 @@ class TestJobNotificationMixin(object):
                                  'use_fact_cache': bool,
                                  'verbosity': int},
                          'job_friendly_name': str,
-                         'job_summary_dict': str,
+                         'job_metadata': str,
+                         'approval_status': str,
+                         'approval_node_name': str,
+                         'workflow_url': str,
                          'url': str}
 
 
@@ -107,10 +106,14 @@ class TestJobNotificationMixin(object):
                         assert isinstance(obj[key], dict)
                         check_structure(expected_structure[key], obj[key])
                     else:
-                        assert isinstance(obj[key], expected_structure[key])
+                        if key == 'job_explanation':
+                            assert isinstance(str(obj[key]), expected_structure[key])
+                        else:
+                            assert isinstance(obj[key], expected_structure[key])
         kwargs = {}
         if JobClass is InventoryUpdate:
             kwargs['inventory_source'] = inventory_source
+            kwargs['source'] = inventory_source.source
         elif JobClass is ProjectUpdate:
             kwargs['project'] = project
 
@@ -119,6 +122,15 @@ class TestJobNotificationMixin(object):
 
         context = job.context(job_serialization)
         check_structure(TestJobNotificationMixin.CONTEXT_STRUCTURE, context)
+
+
+    @pytest.mark.django_db
+    def test_context_job_metadata_with_unicode(self):
+        job = Job.objects.create(name='批量安装项目')
+        job_serialization = UnifiedJobSerializer(job).to_representation(job)
+        context = job.context(job_serialization)
+        assert '批量安装项目' in context['job_metadata']
+
 
     def test_context_stub(self):
         """The context stub is a fake context used to validate custom notification messages. Ensure that
@@ -144,5 +156,3 @@ class TestJobNotificationMixin(object):
 
         context_stub = JobNotificationMixin.context_stub()
         check_structure_and_completeness(TestJobNotificationMixin.CONTEXT_STRUCTURE, context_stub)
-
-

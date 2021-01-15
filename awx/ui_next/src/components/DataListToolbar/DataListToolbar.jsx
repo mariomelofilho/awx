@@ -1,192 +1,192 @@
-import React, { Fragment } from 'react';
+import React, { useEffect, useState } from 'react';
 import PropTypes from 'prop-types';
 import { withI18n } from '@lingui/react';
 import { t } from '@lingui/macro';
 import {
   Checkbox,
-  Toolbar as PFToolbar,
-  ToolbarGroup as PFToolbarGroup,
+  Toolbar,
+  ToolbarContent,
+  ToolbarGroup,
   ToolbarItem,
+  ToolbarToggleGroup,
+  Dropdown,
+  KebabToggle,
 } from '@patternfly/react-core';
-
-import styled from 'styled-components';
+import { SearchIcon } from '@patternfly/react-icons';
 import ExpandCollapse from '../ExpandCollapse';
 import Search from '../Search';
 import Sort from '../Sort';
-import VerticalSeparator from '../VerticalSeparator';
+import { SearchColumns, SortColumns, QSConfig } from '../../types';
+import { KebabifiedProvider } from '../../contexts/Kebabified';
 
-const AWXToolbar = styled.div`
-  --awx-toolbar--BackgroundColor: var(--pf-global--BackgroundColor--light-100);
-  --awx-toolbar--BorderColor: #ebebeb;
-  --awx-toolbar--BorderWidth: var(--pf-global--BorderWidth--sm);
+function DataListToolbar({
+  itemCount,
+  clearAllFilters,
+  searchColumns,
+  searchableKeys,
+  relatedSearchableKeys,
+  sortColumns,
+  showSelectAll,
+  isAllSelected,
+  isCompact,
+  onSort,
+  onSearch,
+  onReplaceSearch,
+  onRemove,
+  onCompact,
+  onExpand,
+  onSelectAll,
+  additionalControls,
+  i18n,
+  qsConfig,
+  pagination,
+}) {
+  const showExpandCollapse = onCompact && onExpand;
+  const [isKebabOpen, setIsKebabOpen] = useState(false);
+  const [isKebabModalOpen, setIsKebabModalOpen] = useState(false);
+  const [isAdvancedSearchShown, setIsAdvancedSearchShown] = useState(false);
 
-  --pf-global--target-size--MinHeight: 0;
-  --pf-global--target-size--MinWidth: 0;
-  --pf-global--FontSize--md: 14px;
+  const onShowAdvancedSearch = shown => {
+    setIsAdvancedSearchShown(shown);
+    setIsKebabOpen(false);
+  };
 
-  border-bottom: var(--awx-toolbar--BorderWidth) solid
-    var(--awx-toolbar--BorderColor);
-  background-color: var(--awx-toolbar--BackgroundColor);
-  display: flex;
-  min-height: 70px;
-  flex-grow: 1;
-`;
+  useEffect(() => {
+    if (!isKebabModalOpen) {
+      setIsKebabOpen(false);
+    }
+  }, [isKebabModalOpen]);
 
-const Toolbar = styled(PFToolbar)`
-  flex-grow: 1;
-  margin-left: 20px;
-  margin-right: 20px;
-`;
-
-const ToolbarGroup = styled(PFToolbarGroup)`
-  &&& {
-    margin: 0;
-  }
-`;
-
-const ColumnLeft = styled.div`
-  display: flex;
-  flex-basis: ${props => (props.fillWidth ? 'auto' : '100%')};
-  flex-grow: ${props => (props.fillWidth ? '1' : '0')};
-  justify-content: flex-start;
-  align-items: center;
-  padding: 10px 0 8px 0;
-
-  @media screen and (min-width: 980px) {
-    flex-basis: ${props => (props.fillWidth ? 'auto' : '50%')};
-  }
-`;
-
-const ColumnRight = styled.div`
-  display: flex;
-  flex-basis: ${props => (props.fillWidth ? 'auto' : '100%')};
-  flex-grow: 0;
-  justify-content: flex-start;
-  align-items: center;
-  padding: 8px 0 10px 0;
-
-  @media screen and (min-width: 980px) {
-    flex-basis: ${props => (props.fillWidth ? 'auto' : '50%')};
-  }
-`;
-
-const AdditionalControlsWrapper = styled.div`
-  display: flex;
-  flex-grow: 1;
-  justify-content: flex-end;
-  align-items: center;
-
-  & > :not(:first-child) {
-    margin-left: 20px;
-  }
-`;
-
-class DataListToolbar extends React.Component {
-  render() {
-    const {
-      columns,
-      showSelectAll,
-      isAllSelected,
-      isCompact,
-      fillWidth,
-      onSort,
-      onSearch,
-      onCompact,
-      onExpand,
-      onSelectAll,
-      sortOrder,
-      sortedColumnKey,
-      additionalControls,
-      i18n,
-    } = this.props;
-
-    const showExpandCollapse = onCompact && onExpand;
-    return (
-      <AWXToolbar>
-        <Toolbar css={fillWidth ? 'margin-right: 0; margin-left: 0' : ''}>
-          <ColumnLeft fillWidth={fillWidth}>
-            {showSelectAll && (
-              <Fragment>
-                <ToolbarItem>
-                  <Checkbox
-                    checked={isAllSelected}
-                    onChange={onSelectAll}
-                    aria-label={i18n._(t`Select all`)}
-                    id="select-all"
-                  />
-                </ToolbarItem>
-                <VerticalSeparator />
-              </Fragment>
-            )}
-            <ToolbarItem css="flex-grow: 1;">
-              <Search
-                columns={columns}
-                onSearch={onSearch}
-                sortedColumnKey={sortedColumnKey}
-              />
-            </ToolbarItem>
-            <VerticalSeparator />
-          </ColumnLeft>
-          <ColumnRight fillWidth={fillWidth}>
+  return (
+    <Toolbar
+      id={`${qsConfig.namespace}-list-toolbar`}
+      clearAllFilters={clearAllFilters}
+      collapseListedFiltersBreakpoint="lg"
+      clearFiltersButtonText={i18n._(t`Clear all filters`)}
+    >
+      <ToolbarContent>
+        {showSelectAll && (
+          <ToolbarGroup>
             <ToolbarItem>
-              <Sort
-                columns={columns}
-                onSort={onSort}
-                sortOrder={sortOrder}
-                sortedColumnKey={sortedColumnKey}
+              <Checkbox
+                isChecked={isAllSelected}
+                onChange={onSelectAll}
+                aria-label={i18n._(t`Select all`)}
+                id="select-all"
               />
             </ToolbarItem>
-            {showExpandCollapse && (
-              <Fragment>
-                <VerticalSeparator />
-                <ToolbarGroup>
-                  <ExpandCollapse
-                    isCompact={isCompact}
-                    onCompact={onCompact}
-                    onExpand={onExpand}
+          </ToolbarGroup>
+        )}
+        <ToolbarToggleGroup toggleIcon={<SearchIcon />} breakpoint="lg">
+          <ToolbarItem>
+            <Search
+              qsConfig={qsConfig}
+              columns={[
+                ...searchColumns,
+                { name: i18n._(t`Advanced`), key: 'advanced' },
+              ]}
+              searchableKeys={searchableKeys}
+              relatedSearchableKeys={relatedSearchableKeys}
+              onSearch={onSearch}
+              onReplaceSearch={onReplaceSearch}
+              onShowAdvancedSearch={onShowAdvancedSearch}
+              onRemove={onRemove}
+            />
+          </ToolbarItem>
+          {sortColumns && (
+            <ToolbarItem>
+              <Sort qsConfig={qsConfig} columns={sortColumns} onSort={onSort} />
+            </ToolbarItem>
+          )}
+        </ToolbarToggleGroup>
+        {showExpandCollapse && (
+          <ToolbarGroup>
+            <>
+              <ToolbarItem>
+                <ExpandCollapse
+                  isCompact={isCompact}
+                  onCompact={onCompact}
+                  onExpand={onExpand}
+                />
+              </ToolbarItem>
+            </>
+          </ToolbarGroup>
+        )}
+        {isAdvancedSearchShown && additionalControls.length > 0 && (
+          <ToolbarItem>
+            <KebabifiedProvider
+              value={{
+                isKebabified: true,
+                onKebabModalChange: setIsKebabModalOpen,
+              }}
+            >
+              <Dropdown
+                toggle={
+                  <KebabToggle
+                    onToggle={isOpen => {
+                      if (!isKebabModalOpen) {
+                        setIsKebabOpen(isOpen);
+                      }
+                    }}
                   />
-                </ToolbarGroup>
-                {additionalControls && <VerticalSeparator />}
-              </Fragment>
-            )}
-            <AdditionalControlsWrapper>
-              {additionalControls}
-            </AdditionalControlsWrapper>
-          </ColumnRight>
-        </Toolbar>
-      </AWXToolbar>
-    );
-  }
+                }
+                isOpen={isKebabOpen}
+                isPlain
+                dropdownItems={additionalControls}
+              />
+            </KebabifiedProvider>
+          </ToolbarItem>
+        )}
+        {!isAdvancedSearchShown && (
+          <ToolbarGroup>
+            {additionalControls.map(control => (
+              <ToolbarItem key={control.key}>{control}</ToolbarItem>
+            ))}
+          </ToolbarGroup>
+        )}
+        {!isAdvancedSearchShown && pagination && itemCount > 0 && (
+          <ToolbarItem variant="pagination">{pagination}</ToolbarItem>
+        )}
+      </ToolbarContent>
+    </Toolbar>
+  );
 }
 
 DataListToolbar.propTypes = {
-  columns: PropTypes.arrayOf(PropTypes.object).isRequired,
+  itemCount: PropTypes.number,
+  clearAllFilters: PropTypes.func,
+  qsConfig: QSConfig.isRequired,
+  searchColumns: SearchColumns.isRequired,
+  searchableKeys: PropTypes.arrayOf(PropTypes.string),
+  relatedSearchableKeys: PropTypes.arrayOf(PropTypes.string),
+  sortColumns: SortColumns,
   showSelectAll: PropTypes.bool,
   isAllSelected: PropTypes.bool,
   isCompact: PropTypes.bool,
-  fillWidth: PropTypes.bool,
   onCompact: PropTypes.func,
   onExpand: PropTypes.func,
   onSearch: PropTypes.func,
+  onReplaceSearch: PropTypes.func,
   onSelectAll: PropTypes.func,
   onSort: PropTypes.func,
-  sortOrder: PropTypes.string,
-  sortedColumnKey: PropTypes.string,
   additionalControls: PropTypes.arrayOf(PropTypes.node),
 };
 
 DataListToolbar.defaultProps = {
+  itemCount: 0,
+  searchableKeys: [],
+  relatedSearchableKeys: [],
+  sortColumns: null,
+  clearAllFilters: null,
   showSelectAll: false,
   isAllSelected: false,
   isCompact: false,
-  fillWidth: false,
   onCompact: null,
   onExpand: null,
   onSearch: null,
+  onReplaceSearch: null,
   onSelectAll: null,
   onSort: null,
-  sortOrder: 'ascending',
-  sortedColumnKey: 'name',
   additionalControls: [],
 };
 

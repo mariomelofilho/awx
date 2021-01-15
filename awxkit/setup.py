@@ -2,12 +2,6 @@ import os
 import glob
 import shutil
 from setuptools import setup, find_packages, Command
-try:  # for pip >= 10
-    from pip._internal.req import parse_requirements
-except ImportError:  # for pip <= 9.0.3
-    from pip.req import parse_requirements
-
-requirements = [str(r.req) for r in parse_requirements('requirements.txt', session=False)]
 
 
 def get_version():
@@ -60,18 +54,39 @@ class CleanCommand(Command):
 setup(
     name='awxkit',
     version=get_version(),
-    description='awx cli client',
+    description='The official command line interface for Ansible AWX',
+    author='Red Hat, Inc.',
+    author_email='info@ansible.com',
+    url='https://github.com/ansible/awx',
     packages=find_packages(exclude=['test']),
     cmdclass={
         'clean': CleanCommand,
     },
     include_package_data=True,
-    install_requires=requirements,
-    python_requires=">=2.7,!=3.0.*,!=3.1.*,!=3.2.*,!=3.3.*,!=3.4.*",
+    install_requires=[
+        'PyYAML',
+        'requests',
+    ],
+    python_requires=">=3.6",
     extras_require={
         'formatting': ['jq'],
         'websockets': ['websocket-client>0.54.0'],
+        'crypto': ['cryptography']
     },
+    license='Apache 2.0',
+    classifiers=[
+        'Development Status :: 5 - Production/Stable',
+        'Environment :: Console',
+        'Intended Audience :: Developers',
+        'Intended Audience :: System Administrators',
+        'License :: OSI Approved :: Apache Software License',
+        'Operating System :: MacOS :: MacOS X',
+        'Operating System :: POSIX :: Linux',
+        'Programming Language :: Python',
+        'Programming Language :: Python :: 3.6',
+        'Topic :: System :: Software Distribution',
+        'Topic :: System :: Systems Administration',
+    ],
     entry_points={
         'console_scripts': [
             'akit=awxkit.scripts.basic_session:load_interactive',

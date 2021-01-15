@@ -4,6 +4,7 @@ set -ue
 requirements_in="$(readlink -f ./requirements.in)"
 requirements_ansible_in="$(readlink -f ./requirements_ansible.in)"
 requirements="$(readlink -f ./requirements.txt)"
+requirements_git="$(readlink -f ./requirements_git.txt)"
 requirements_ansible="$(readlink -f ./requirements_ansible.txt)"
 pip_compile="pip-compile --no-header --quiet -r --allow-unsafe"
 
@@ -20,7 +21,7 @@ _cleanup() {
 
 install_deps() {
   pip install pip --upgrade
-  pip install pip-tools
+  pip install "pip-tools==5.4.0"  # see https://github.com/jazzband/pip-tools/pull/1237
 }
 
 generate_requirements_v3() {
@@ -31,7 +32,11 @@ generate_requirements_v3() {
 
   install_deps
 
-  ${pip_compile} --output-file requirements.txt "${requirements_in}"
+  ${pip_compile} --output-file requirements.txt "${requirements_in}" "${requirements_git}"
+  # consider the git requirements for purposes of resolving deps
+  # Then remove any git+ lines from requirements.txt
+  cp requirements.txt requirements_tmp.txt
+  grep -v "^git+" requirements_tmp.txt > requirements.txt && rm requirements_tmp.txt
   ${pip_compile} --output-file requirements_ansible_py3.txt "${requirements_ansible_in}"
 }
 
@@ -77,7 +82,8 @@ main() {
   generate_requirements_v3
   generate_requirements_v2
 
-  sed -i 's/^docutils.*//g' requirements.txt
+  sed -i 's/^wheel==0.30.0.*/wheel==0.33.6  # via azure-cli-core (overriden, see upgrade blockers)/g' requirements_ansible.txt
+  sed -i 's/^wheel==0.30.0.*/wheel==0.33.6  # via azure-cli-core (overriden, see upgrade blockers)/g' requirements_ansible_py3.txt
   generate_patch | patch -p4 requirements_ansible_py3.txt
 
   cp -vf requirements_ansible_py3.txt "${requirements_ansible}"
@@ -87,4 +93,4 @@ main() {
 }
 
 # set EVAL=1 in case you want to source this script
-test "${EVAL:-0}" = "1" || main "${1:-}"
+test "${EVAL:-0}" -eq "1" || main "${1:-}"

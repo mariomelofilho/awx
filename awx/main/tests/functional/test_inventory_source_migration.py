@@ -2,50 +2,10 @@ import pytest
 from unittest import mock
 
 from awx.main.migrations import _inventory_source as invsrc
-from awx.main.models import InventorySource
 
 from django.apps import apps
 
-
-@pytest.mark.django_db
-def test_inv_src_manual_removal(inventory_source):
-    inventory_source.source = ''
-    inventory_source.save()
-
-    assert InventorySource.objects.filter(pk=inventory_source.pk).exists()
-    invsrc.remove_manual_inventory_sources(apps, None)
-    assert not InventorySource.objects.filter(pk=inventory_source.pk).exists()
-
-
-@pytest.mark.django_db
-def test_rax_inv_src_removal(inventory_source):
-    inventory_source.source = 'rax'
-    inventory_source.save()
-
-    assert InventorySource.objects.filter(pk=inventory_source.pk).exists()
-    invsrc.remove_rax_inventory_sources(apps, None)
-    assert not InventorySource.objects.filter(pk=inventory_source.pk).exists()
-
-
-@pytest.mark.django_db
-def test_inv_src_rename(inventory_source_factory):
-    inv_src01 = inventory_source_factory('t1')
-
-    invsrc.rename_inventory_sources(apps, None)
-
-    inv_src01.refresh_from_db()
-    # inv-is-t1 is generated in the inventory_source_factory
-    assert inv_src01.name == 't1 - inv-is-t1 - 0'
-
-
-@pytest.mark.django_db
-def test_azure_inv_src_removal(inventory_source):
-    inventory_source.source = 'azure'
-    inventory_source.save()
-
-    assert InventorySource.objects.filter(pk=inventory_source.pk).exists()
-    invsrc.remove_azure_inventory_sources(apps, None)
-    assert not InventorySource.objects.filter(pk=inventory_source.pk).exists()
+from awx.main.models import InventorySource, InventoryUpdate, ManagedCredentialType, CredentialType, Credential
 
 
 @pytest.mark.parametrize('vars,id_var,result', [
@@ -79,3 +39,43 @@ def test_apply_new_instance_id(inventory_source):
     host2.refresh_from_db()
     assert host1.instance_id == ''
     assert host2.instance_id == 'bad_user'
+
+
+@pytest.mark.django_db
+def test_cloudforms_inventory_removal(inventory):
+    ManagedCredentialType(
+        name='Red Hat CloudForms',
+        namespace='cloudforms',
+        kind='cloud',
+        managed_by_tower=True,
+        inputs={},
+    )
+    CredentialType.defaults['cloudforms']().save()
+    cloudforms = CredentialType.objects.get(namespace='cloudforms')
+    Credential.objects.create(
+        name='test',
+        credential_type=cloudforms,
+    )
+
+    for source in ('ec2', 'cloudforms'):
+        i = InventorySource.objects.create(
+            name='test',
+            inventory=inventory,
+            organization=inventory.organization,
+            source=source,
+        )
+        InventoryUpdate.objects.create(
+            name='test update',
+            inventory_source=i,
+            source=source,
+        )
+    assert Credential.objects.count() == 1
+    assert InventorySource.objects.count() == 2  # ec2 + cf
+    assert InventoryUpdate.objects.count() == 2  # ec2 + cf
+    invsrc.delete_cloudforms_inv_source(apps, None)
+    assert InventorySource.objects.count() == 1  # ec2
+    assert InventoryUpdate.objects.count() == 1  # ec2
+    assert InventorySource.objects.first().source == 'ec2'
+    assert InventoryUpdate.objects.first().source == 'ec2'
+    assert Credential.objects.count() == 0
+    assert CredentialType.objects.filter(namespace='cloudforms').exists() is False

@@ -1,201 +1,320 @@
-import React from 'react';
+import 'styled-components/macro';
+import React, { Fragment, useState } from 'react';
 import PropTypes from 'prop-types';
 import { withI18n } from '@lingui/react';
 import { t } from '@lingui/macro';
+import { withRouter } from 'react-router-dom';
 import {
-  Button as PFButton,
-  Dropdown as PFDropdown,
-  DropdownPosition,
-  DropdownToggle,
-  DropdownItem,
-  Form,
-  FormGroup,
-  TextInput as PFTextInput,
+  Button,
+  ButtonVariant,
+  InputGroup,
+  Select,
+  SelectOption,
+  SelectVariant,
+  TextInput,
+  ToolbarGroup,
+  ToolbarItem,
+  ToolbarFilter,
 } from '@patternfly/react-core';
 import { SearchIcon } from '@patternfly/react-icons';
-
 import styled from 'styled-components';
-
-const TextInput = styled(PFTextInput)`
-  min-height: 0px;
-  height: 30px;
-`;
-
-const Button = styled(PFButton)`
-  width: 34px;
-  padding: 0px;
-`;
-
-const Dropdown = styled(PFDropdown)`
-  &&& {
-    /* Higher specificity required because we are selecting unclassed elements */
-    > button {
-      min-height: 30px;
-      min-width: 70px;
-      height: 30px;
-      padding: 0 10px;
-      margin: 0px;
-
-      > span {
-        /* text element */
-        width: auto;
-      }
-
-      > svg {
-        /* caret icon */
-        margin: 0px;
-        padding-top: 3px;
-        padding-left: 3px;
-      }
-    }
-  }
-`;
+import { parseQueryString } from '../../util/qs';
+import { QSConfig, SearchColumns } from '../../types';
+import AdvancedSearch from './AdvancedSearch';
 
 const NoOptionDropdown = styled.div`
   align-self: stretch;
-  border: 1px solid grey;
-  padding: 3px 7px;
+  border: 1px solid var(--pf-global--BorderColor--300);
+  padding: 5px 15px;
   white-space: nowrap;
+  border-bottom-color: var(--pf-global--BorderColor--200);
 `;
 
-const InputFormGroup = styled(FormGroup)`
-  flex: 1;
-`;
+function Search({
+  columns,
+  i18n,
+  onSearch,
+  onReplaceSearch,
+  onRemove,
+  qsConfig,
+  location,
+  searchableKeys,
+  relatedSearchableKeys,
+  onShowAdvancedSearch,
+}) {
+  const [isSearchDropdownOpen, setIsSearchDropdownOpen] = useState(false);
+  const [searchKey, setSearchKey] = useState(
+    (() => {
+      const defaultColumn = columns.filter(col => col.isDefault);
 
-class Search extends React.Component {
-  constructor(props) {
-    super(props);
+      if (defaultColumn.length !== 1) {
+        throw new Error(
+          'One (and only one) searchColumn must be marked isDefault: true'
+        );
+      }
 
-    const { sortedColumnKey } = this.props;
-    this.state = {
-      isSearchDropdownOpen: false,
-      searchKey: sortedColumnKey,
-      searchValue: '',
-    };
+      return defaultColumn[0]?.key;
+    })()
+  );
+  const [searchValue, setSearchValue] = useState('');
+  const [isFilterDropdownOpen, setIsFilterDropdownOpen] = useState(false);
 
-    this.handleSearchInputChange = this.handleSearchInputChange.bind(this);
-    this.handleDropdownToggle = this.handleDropdownToggle.bind(this);
-    this.handleDropdownSelect = this.handleDropdownSelect.bind(this);
-    this.handleSearch = this.handleSearch.bind(this);
-  }
+  const handleDropdownSelect = ({ target }) => {
+    const { key: actualSearchKey } = columns.find(
+      ({ name }) => name === target.innerText
+    );
+    onShowAdvancedSearch(actualSearchKey === 'advanced');
+    setIsFilterDropdownOpen(false);
+    setSearchKey(actualSearchKey);
+  };
 
-  handleDropdownToggle(isSearchDropdownOpen) {
-    this.setState({ isSearchDropdownOpen });
-  }
-
-  handleDropdownSelect({ target }) {
-    const { columns } = this.props;
-    const { innerText } = target;
-
-    const { key: searchKey } = columns.find(({ name }) => name === innerText);
-    this.setState({ isSearchDropdownOpen: false, searchKey });
-  }
-
-  handleSearch(e) {
+  const handleSearch = e => {
     // keeps page from fully reloading
     e.preventDefault();
 
-    const { searchKey, searchValue } = this.state;
-    const { onSearch } = this.props;
+    if (searchValue) {
+      onSearch(searchKey, searchValue);
+      setSearchValue('');
+    }
+  };
 
-    // TODO: probably not _always_ add icontains.  I don't think icontains works for numbers.
-    onSearch(`${searchKey}__icontains`, searchValue);
+  const handleTextKeyDown = e => {
+    if (e.key && e.key === 'Enter') {
+      handleSearch(e);
+    }
+  };
 
-    this.setState({ searchValue: '' });
-  }
+  const handleFilterDropdownSelect = (key, event, actualValue) => {
+    if (event.target.checked) {
+      onSearch(key, actualValue);
+    } else {
+      onRemove(key, actualValue);
+    }
+  };
 
-  handleSearchInputChange(searchValue) {
-    this.setState({ searchValue });
-  }
+  const filterDefaultParams = (paramsArr, config) => {
+    const defaultParamsKeys = Object.keys(config.defaultParams || {});
+    return paramsArr.filter(key => defaultParamsKeys.indexOf(key) === -1);
+  };
 
-  render() {
-    const { up } = DropdownPosition;
-    const { columns, i18n } = this.props;
-    const { isSearchDropdownOpen, searchKey, searchValue } = this.state;
-    const { name: searchColumnName } = columns.find(
-      ({ key }) => key === searchKey
+  const getLabelFromValue = (value, colKey) => {
+    let label = value;
+    const currentSearchColumn = columns.find(({ key }) => key === colKey);
+    if (currentSearchColumn?.options?.length) {
+      [, label] = currentSearchColumn.options.find(
+        ([optVal]) => optVal === value
+      );
+    } else if (currentSearchColumn?.booleanLabels) {
+      label = currentSearchColumn.booleanLabels[value];
+    }
+    return (label || colKey).toString();
+  };
+
+  const getChipsByKey = () => {
+    const queryParams = parseQueryString(qsConfig, location.search);
+
+    const queryParamsByKey = {};
+    columns.forEach(({ name, key }) => {
+      queryParamsByKey[key] = { key, label: name, chips: [] };
+    });
+    const nonDefaultParams = filterDefaultParams(
+      Object.keys(queryParams || {}),
+      qsConfig
     );
 
-    const searchDropdownItems = columns
-      .filter(({ key, isSearchable }) => isSearchable && key !== searchKey)
-      .map(({ key, name }) => (
-        <DropdownItem key={key} component="button">
-          {name}
-        </DropdownItem>
-      ));
+    nonDefaultParams.forEach(key => {
+      const columnKey = key;
+      const label = columns.filter(
+        ({ key: keyToCheck }) => columnKey === keyToCheck
+      ).length
+        ? `${
+            columns.find(({ key: keyToCheck }) => columnKey === keyToCheck).name
+          } (${key})`
+        : columnKey;
 
-    return (
-      <Form autoComplete="off">
-        <div className="pf-c-input-group">
-          {searchDropdownItems.length > 0 ? (
-            <FormGroup
-              fieldId="searchKeyDropdown"
-              label={
-                <span className="pf-screen-reader">
-                  {i18n._(t`Search key dropdown`)}
-                </span>
-              }
-            >
-              <Dropdown
-                onToggle={this.handleDropdownToggle}
-                onSelect={this.handleDropdownSelect}
-                direction={up}
-                isOpen={isSearchDropdownOpen}
-                toggle={
-                  <DropdownToggle
-                    id="awx-search"
-                    onToggle={this.handleDropdownToggle}
-                  >
-                    {searchColumnName}
-                  </DropdownToggle>
-                }
-                dropdownItems={searchDropdownItems}
-              />
-            </FormGroup>
-          ) : (
-            <NoOptionDropdown>{searchColumnName}</NoOptionDropdown>
-          )}
-          <InputFormGroup
-            fieldId="searchValueTextInput"
-            label={
-              <span className="pf-screen-reader">
-                {i18n._(t`Search value text input`)}
-              </span>
-            }
-            style={{ width: '100%' }}
-            suppressClassNameWarning
+      queryParamsByKey[columnKey] = { key, label, chips: [] };
+
+      if (Array.isArray(queryParams[key])) {
+        queryParams[key].forEach(val =>
+          queryParamsByKey[columnKey].chips.push({
+            key: `${key}:${val}`,
+            node: getLabelFromValue(val, columnKey),
+          })
+        );
+      } else {
+        queryParamsByKey[columnKey].chips.push({
+          key: `${key}:${queryParams[key]}`,
+          node: getLabelFromValue(queryParams[key], columnKey),
+        });
+      }
+    });
+    return queryParamsByKey;
+  };
+
+  const chipsByKey = getChipsByKey();
+
+  const { name: searchColumnName } = columns.find(
+    ({ key }) => key === searchKey
+  );
+
+  const searchOptions = columns
+    .filter(({ key }) => key !== searchKey)
+    .map(({ key, name }) => (
+      <SelectOption key={key} value={name} id={`select-option-${key}`}>
+        {name}
+      </SelectOption>
+    ));
+
+  return (
+    <ToolbarGroup variant="filter-group">
+      <ToolbarItem>
+        {searchOptions.length > 0 ? (
+          <Select
+            variant={SelectVariant.single}
+            className="simpleKeySelect"
+            aria-label={i18n._(t`Simple key select`)}
+            onToggle={setIsSearchDropdownOpen}
+            onSelect={handleDropdownSelect}
+            selections={searchColumnName}
+            isOpen={isSearchDropdownOpen}
+            ouiaId="simple-key-select"
           >
-            <TextInput
-              type="search"
-              aria-label={i18n._(t`Search text input`)}
-              value={searchValue}
-              onChange={this.handleSearchInputChange}
-              style={{ height: '30px' }}
+            {searchOptions}
+          </Select>
+        ) : (
+          <NoOptionDropdown>{searchColumnName}</NoOptionDropdown>
+        )}
+      </ToolbarItem>
+      {columns.map(({ key, name, options, isBoolean, booleanLabels = {} }) => (
+        <ToolbarFilter
+          chips={chipsByKey[key] ? chipsByKey[key].chips : []}
+          deleteChip={(unusedKey, chip) => {
+            const [columnKey, ...value] = chip.key.split(':');
+            onRemove(columnKey, value.join(':'));
+          }}
+          categoryName={chipsByKey[key] ? chipsByKey[key].label : key}
+          key={key}
+          showToolbarItem={searchKey === key}
+        >
+          {(key === 'advanced' && (
+            <AdvancedSearch
+              onSearch={onSearch}
+              searchableKeys={searchableKeys}
+              relatedSearchableKeys={relatedSearchableKeys}
             />
-          </InputFormGroup>
-          <Button
-            variant="tertiary"
-            type="submit"
-            aria-label={i18n._(t`Search submit button`)}
-            onClick={this.handleSearch}
-          >
-            <SearchIcon />
-          </Button>
-        </div>
-      </Form>
-    );
-  }
+          )) ||
+            (options && (
+              <Fragment>
+                <Select
+                  variant={SelectVariant.checkbox}
+                  aria-label={name}
+                  onToggle={setIsFilterDropdownOpen}
+                  onSelect={(event, selection) =>
+                    handleFilterDropdownSelect(key, event, selection)
+                  }
+                  selections={chipsByKey[key].chips.map(chip => {
+                    const [, ...value] = chip.key.split(':');
+                    return value.join(':');
+                  })}
+                  isOpen={isFilterDropdownOpen}
+                  placeholderText={`Filter By ${name}`}
+                  ouiaId={`filter-by-${key}`}
+                >
+                  {options.map(([optionKey, optionLabel]) => (
+                    <SelectOption
+                      key={optionKey}
+                      value={optionKey}
+                      inputId={`select-option-${optionKey}`}
+                    >
+                      {optionLabel}
+                    </SelectOption>
+                  ))}
+                </Select>
+              </Fragment>
+            )) ||
+            (isBoolean && (
+              <Select
+                aria-label={name}
+                onToggle={setIsFilterDropdownOpen}
+                onSelect={(event, selection) => onReplaceSearch(key, selection)}
+                selections={chipsByKey[key].chips[0]?.label}
+                isOpen={isFilterDropdownOpen}
+                placeholderText={`Filter By ${name}`}
+                ouiaId={`filter-by-${key}`}
+              >
+                <SelectOption key="true" value="true">
+                  {booleanLabels.true || i18n._(t`Yes`)}
+                </SelectOption>
+                <SelectOption key="false" value="false">
+                  {booleanLabels.false || i18n._(t`No`)}
+                </SelectOption>
+              </Select>
+            )) || (
+              <InputGroup>
+                {/* TODO: add support for dates:
+          qsConfig.dateFields.filter(field => field === key).length && "date" */}
+                <TextInput
+                  type={
+                    (qsConfig.integerFields.find(
+                      field => field === searchKey
+                    ) &&
+                      'number') ||
+                    'search'
+                  }
+                  aria-label={i18n._(t`Search text input`)}
+                  value={searchValue}
+                  onChange={setSearchValue}
+                  onKeyDown={handleTextKeyDown}
+                />
+                <div css={!searchValue && `cursor:not-allowed`}>
+                  <Button
+                    variant={ButtonVariant.control}
+                    isDisabled={!searchValue}
+                    aria-label={i18n._(t`Search submit button`)}
+                    onClick={handleSearch}
+                  >
+                    <SearchIcon />
+                  </Button>
+                </div>
+              </InputGroup>
+            )}
+        </ToolbarFilter>
+      ))}
+      {/* Add a ToolbarFilter for any key that doesn't have it's own
+      search column so the chips show up */}
+      {Object.keys(chipsByKey)
+        .filter(val => chipsByKey[val].chips.length > 0)
+        .filter(val => columns.map(val2 => val2.key).indexOf(val) === -1)
+        .map(leftoverKey => (
+          <ToolbarFilter
+            chips={chipsByKey[leftoverKey] ? chipsByKey[leftoverKey].chips : []}
+            deleteChip={(unusedKey, chip) => {
+              const [columnKey, ...value] = chip.key.split(':');
+              onRemove(columnKey, value.join(':'));
+            }}
+            categoryName={
+              chipsByKey[leftoverKey]
+                ? chipsByKey[leftoverKey].label
+                : leftoverKey
+            }
+            key={leftoverKey}
+          />
+        ))}
+    </ToolbarGroup>
+  );
 }
 
 Search.propTypes = {
-  columns: PropTypes.arrayOf(PropTypes.object).isRequired,
+  qsConfig: QSConfig.isRequired,
+  columns: SearchColumns.isRequired,
   onSearch: PropTypes.func,
-  sortedColumnKey: PropTypes.string,
+  onRemove: PropTypes.func,
+  onShowAdvancedSearch: PropTypes.func.isRequired,
 };
 
 Search.defaultProps = {
   onSearch: null,
-  sortedColumnKey: 'name',
+  onRemove: null,
 };
 
-export default withI18n()(Search);
+export default withI18n()(withRouter(Search));

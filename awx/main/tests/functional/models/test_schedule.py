@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timedelta
 from contextlib import contextmanager
 
 from django.utils.timezone import now
@@ -103,7 +103,8 @@ class TestComputedFields:
             Schedule.objects.filter(pk=s.pk).update(next_run=old_next_run)
             s.next_run = old_next_run
             prior_modified = s.modified
-            s.update_computed_fields()
+            with mock.patch('awx.main.models.schedules.emit_channel_notification'):
+                s.update_computed_fields()
             assert s.next_run != old_next_run
             assert s.modified == prior_modified
 
@@ -133,7 +134,8 @@ class TestComputedFields:
             assert s.next_run is None
             assert job_template.next_schedule is None
             s.rrule = self.distant_rrule
-            s.update_computed_fields()
+            with mock.patch('awx.main.models.schedules.emit_channel_notification'):
+                s.update_computed_fields()
             assert s.next_run is not None
             assert job_template.next_schedule == s
 
@@ -157,6 +159,58 @@ class TestComputedFields:
             job_template.next_schedule.delete()
         job_template.refresh_from_db()
         assert job_template.next_schedule == expected_schedule
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('freq, delta', (
+    ('MINUTELY', 1),
+    ('HOURLY', 1)
+))
+def test_past_week_rrule(job_template, freq, delta):
+    # see: https://github.com/ansible/awx/issues/8071
+    recent = (datetime.utcnow() - timedelta(days=3))
+    recent = recent.replace(hour=0, minute=0, second=0, microsecond=0)
+    recent_dt = recent.strftime('%Y%m%d')
+    rrule = f'DTSTART;TZID=America/New_York:{recent_dt}T000000 RRULE:FREQ={freq};INTERVAL={delta};COUNT=5'  # noqa
+    sched = Schedule.objects.create(
+        name='example schedule',
+        rrule=rrule,
+        unified_job_template=job_template
+    )
+    first_event = sched.rrulestr(sched.rrule)[0]
+    assert first_event.replace(tzinfo=None) == recent
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize('freq, delta', (
+    ('MINUTELY', 1),
+    ('HOURLY', 1)
+))
+def test_really_old_dtstart(job_template, freq, delta):
+    # see: https://github.com/ansible/awx/issues/8071
+    # If an event is per-minute/per-hour and was created a *really long*
+    # time ago, we should just bump forward to start counting "in the last week"
+    rrule = f'DTSTART;TZID=America/New_York:20150101T000000 RRULE:FREQ={freq};INTERVAL={delta}'  # noqa
+    sched = Schedule.objects.create(
+        name='example schedule',
+        rrule=rrule,
+        unified_job_template=job_template
+    )
+    last_week = (datetime.utcnow() - timedelta(days=7)).date()
+    first_event = sched.rrulestr(sched.rrule)[0]
+    assert last_week == first_event.date()
+
+    # the next few scheduled events should be the next minute/hour incremented
+    next_five_events = list(sched.rrulestr(sched.rrule).xafter(now(), count=5))
+
+    assert next_five_events[0] > now()
+    last = None
+    for event in next_five_events:
+        if last:
+            assert event == last + (
+                timedelta(minutes=1) if freq == 'MINUTELY' else timedelta(hours=1)
+            )
+        last = event
 
 
 @pytest.mark.django_db
@@ -323,16 +377,19 @@ def test_dst_phantom_hour(job_template):
 
 
 @pytest.mark.django_db
+@pytest.mark.timeout(3)
 def test_beginning_of_time(job_template):
     # ensure that really large generators don't have performance issues
+    start = now()
     rrule = 'DTSTART:19700101T000000Z RRULE:FREQ=MINUTELY;INTERVAL=1'
     s = Schedule(
         name='Some Schedule',
         rrule=rrule,
         unified_job_template=job_template
     )
-    with pytest.raises(ValueError):
-        s.save()
+    s.save()
+    assert s.next_run > start
+    assert (s.next_run - start).total_seconds() < 60
 
 
 @pytest.mark.django_db

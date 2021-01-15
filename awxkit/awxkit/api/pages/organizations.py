@@ -8,6 +8,8 @@ from . import page
 
 class Organization(HasCreate, HasInstanceGroups, HasNotifications, base.Base):
 
+    NATURAL_KEY = ('name',)
+
     def add_admin(self, user):
         if isinstance(user, page.Page):
             user = user.json
@@ -19,6 +21,24 @@ class Organization(HasCreate, HasInstanceGroups, HasNotifications, base.Base):
             user = user.json
         with suppress(exc.NoContent):
             self.related.users.post(user)
+
+    def add_galaxy_credential(self, credential):
+        if isinstance(credential, page.Page):
+            credential = credential.json
+        with suppress(exc.NoContent):
+            self.related.galaxy_credentials.post({
+                "id": credential.id,
+            })
+
+    def remove_galaxy_credential(self, credential):
+        if isinstance(credential, page.Page):
+            credential = credential.json
+        with suppress(exc.NoContent):
+            self.related.galaxy_credentials.post({
+                "id": credential.id,
+                "disassociate": True,
+            })
+
 
     def payload(self, **kwargs):
         payload = PseudoNamespace(name=kwargs.get('name') or 'Organization - {}'.format(random_title()),

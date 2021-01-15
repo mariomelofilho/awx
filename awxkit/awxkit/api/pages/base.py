@@ -25,6 +25,13 @@ class Base(Page):
                 return self.delete()
         except (exc.NoContent, exc.NotFound, exc.Forbidden):
             pass
+        except (exc.BadRequest, exc.Conflict) as e:
+            if 'Job has not finished processing events' in e.msg:
+                pass
+            if 'Resource is being used' in e.msg:
+                pass
+            else:
+                raise e
 
     def get_object_role(self, role, by_name=False):
         """Lookup and return a related object role by its role field or name.
@@ -140,6 +147,7 @@ class Base(Page):
     load_default_authtoken = load_authtoken
 
     def get_oauth2_token(self, username='', password='', client_id=None,
+                         description='AWX CLI',
                          client_secret=None, scope='write'):
         default_cred = config.credentials.default
         username = username or default_cred.username
@@ -176,7 +184,7 @@ class Base(Page):
             resp = self.connection.post(
                 '/api/v2/users/{}/personal_tokens/'.format(username),
                 json={
-                    "description": "Tower CLI",
+                    "description": description,
                     "application": None,
                     "scope": scope
                 },

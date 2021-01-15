@@ -4,13 +4,7 @@ Basic Usage
 Installation
 ------------
 
-The preferred way to install the AWX CLI is through pip:
-
-.. code:: bash
-
-    pip install "https://github.com/ansible/awx/archive/$VERSION.tar.gz#egg=awxkit&subdirectory=awxkit"
-
-...where ``$VERSION`` is the version of AWX you're running.  To see a list of all available releases, visit: https://github.com/ansible/awx/releases
+.. include:: install.rst
 
 
 Synopsis
@@ -95,5 +89,5 @@ A few of the most important ones are:
 ``--conf.password, TOWER_PASSWORD``
     the AWX password to use for authentication
 
-``--conf.token, TOWER_TOKEN``
+``--conf.token, TOWER_OAUTH_TOKEN``
     an OAuth2.0 token to use for authentication

@@ -26,12 +26,12 @@ first if absent:
 Now, we need to tell Tower to look into this directory for custom venvs. For that,
 we can add this directory to the `CUSTOM_VENV_PATHS` setting as:
 
-    $ HTTP PATCH /api/v2/settings/system {'CUSTOM_VENV_PATHS': ["/opt/my-envs/"]}
+    $ HTTP PATCH /api/v2/settings/system/ {'CUSTOM_VENV_PATHS': ["/opt/my-envs/"]}
 
 If we have venvs spanned over multiple directories, we can add all the paths and
 Tower will aggregate venvs from them:
 
-    $ HTTP PATCH /api/v2/settings/system {'CUSTOM_VENV_PATHS': ["/path/1/to/venv/",
+    $ HTTP PATCH /api/v2/settings/system/ {'CUSTOM_VENV_PATHS': ["/path/1/to/venv/",
                                                                 "/path/2/to/venv/",
                                                                 "/path/3/to/venv/"]}
 
@@ -83,15 +83,17 @@ index aa8b304..eb05f91 100644
 +	virtualenv /opt/my-envs/my-custom-env
 +	/opt/my-envs/my-custom-env/bin/pip install psutil
 +
-diff --git a/installer/image_build/templates/Dockerfile.j2 b/installer/image_build/templates/Dockerfile.j2
-index d69e2c9..a08bae5 100644
---- a/installer/image_build/templates/Dockerfile.j2
-+++ b/installer/image_build/templates/Dockerfile.j2
-@@ -34,6 +34,7 @@ RUN yum -y install epel-release && \
-     pip install virtualenv supervisor && \
-     VENV_BASE=/var/lib/awx/venv make requirements_ansible && \
-     VENV_BASE=/var/lib/awx/venv make requirements_awx && \
-+    VENV_BASE=/var/lib/awx/venv make requirements_custom && \
+diff --git a/installer/roles/image_build/templates/Dockerfile.j2 b/installer/roles/image_build/templates/Dockerfile.j2
+index d3b582ffcb..220ac760a3 100644
+--- a/installer/roles/image_build/templates/Dockerfile.j2
++++ b/installer/roles/image_build/templates/Dockerfile.j2
+@@ -165,6 +165,7 @@ RUN openssl req -nodes -newkey rsa:2048 -keyout /etc/nginx/nginx.key -out /etc/n
+     chmod 640 /etc/nginx/nginx.{csr,key,crt}
+ {% else %}
+ COPY --from=builder /var/lib/awx /var/lib/awx
++COPY --from=builder /opt/my-envs /opt/my-envs
+ RUN ln -s /var/lib/awx/venv/awx/bin/awx-manage /usr/bin/awx-manage
+ {% endif %}
 ```
 
 Once the AWX API is available, update the `CUSTOM_VENV_PATHS` setting as described in `Preparing a New Custom Virtualenv`.
@@ -130,7 +132,7 @@ override that location by setting the variable `custom_venvs_path`.
 
 You can use the variables file like so:
 
-    $ ansible-playbook install.yml --extra-vars "@venv_vars.yaml"
+    $ ansible-playbook -i inventory install.yml --extra-vars "@venv_vars.yaml"
 
 Once the AWX API is available, you will need to update the `CUSTOM_VENV_PATHS`
 setting as described in `Preparing a New Custom Virtualenv`.
@@ -140,22 +142,24 @@ Assigning Custom Virtualenvs
 Once you've created a custom virtualenv, you can assign it at the Organization,
 Project, or Job Template level:
 
-    PATCH https://awx-host.example.org/api/v2/organizations/N/
-    PATCH https://awx-host.example.org/api/v2/projects/N/
-    PATCH https://awx-host.example.org/api/v2/job_templates/N/
+```http
+PATCH https://awx-host.example.org/api/v2/organizations/N/
+PATCH https://awx-host.example.org/api/v2/projects/N/
+PATCH https://awx-host.example.org/api/v2/job_templates/N/
 
-    Content-Type: application/json
-    {
-        'custom_virtualenv': '/opt/my-envs/custom-venv'
-    }
+Content-Type: application/json
+{
+    "custom_virtualenv": "/opt/my-envs/custom-venv/"
+}
+```
 
 An HTTP `GET` request to `/api/v2/config/` will provide a list of
 detected installed virtualenvs:
 
     {
         "custom_virtualenvs": [
-            "/opt/my-envs/custom-venv",
-            "/opt/my-envs/my-other-custom-venv",
+            "/opt/my-envs/custom-venv/",
+            "/opt/my-envs/my-other-custom-venv/",
         ],
         ...
     }

@@ -8,6 +8,7 @@ from awx.sso.fields import (
     SAMLOrgAttrField,
     SAMLTeamAttrField,
     LDAPGroupTypeParamsField,
+    LDAPServerURIField
 )
 
 
@@ -70,6 +71,14 @@ class TestSAMLTeamAttrField():
             {'team': 'Engineering', 'organization': 'Ansible2'},
             {'team': 'Engineering2', 'organization': 'Ansible'},
         ]},
+        {'remove': True, 'saml_attr': 'foobar', 'team_org_map': [
+            {
+                'team': 'Engineering', 'team_alias': 'Engineering Team',
+                'organization': 'Ansible', 'organization_alias': 'Awesome Org'
+            },
+            {'team': 'Engineering', 'organization': 'Ansible2'},
+            {'team': 'Engineering2', 'organization': 'Ansible'},
+        ]},
     ])
     def test_internal_value_valid(self, data):
         field = SAMLTeamAttrField()
@@ -114,3 +123,20 @@ class TestLDAPGroupTypeParamsField():
         with pytest.raises(ValidationError) as e:
             field.to_internal_value(data)
         assert e.value.detail == expected
+
+
+class TestLDAPServerURIField():
+
+    @pytest.mark.parametrize("ldap_uri, exception, expected", [
+        (r'ldap://servername.com:444', None, r'ldap://servername.com:444'),
+        (r'ldap://servername.so3:444', None, r'ldap://servername.so3:444'),
+        (r'ldaps://servername3.s300:344', None, r'ldaps://servername3.s300:344'),
+        (r'ldap://servername.-so3:444', ValidationError, None),
+    ])
+    def test_run_validators_valid(self, ldap_uri, exception, expected):
+        field = LDAPServerURIField()
+        if exception is None:
+            assert field.run_validators(ldap_uri) == expected
+        else:
+            with pytest.raises(exception):
+                field.run_validators(ldap_uri)

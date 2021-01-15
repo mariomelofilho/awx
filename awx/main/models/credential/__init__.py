@@ -11,7 +11,7 @@ import tempfile
 from types import SimpleNamespace
 
 # Jinja2
-from jinja2 import Template
+from jinja2 import sandbox
 
 # Django
 from django.db import models
@@ -64,7 +64,7 @@ def build_safe_env(env):
     for k, v in safe_env.items():
         if k == 'AWS_ACCESS_KEY_ID':
             continue
-        elif k.startswith('ANSIBLE_') and not k.startswith('ANSIBLE_NET'):
+        elif k.startswith('ANSIBLE_') and not k.startswith('ANSIBLE_NET') and not k.startswith('ANSIBLE_GALAXY_SERVER'):
             continue
         elif hidden_re.search(k):
             safe_env[k] = HIDDEN_PASSWORD
@@ -86,6 +86,7 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
         unique_together = (('organization', 'name', 'credential_type'))
 
     PASSWORD_FIELDS = ['inputs']
+    FIELDS_TO_PRESERVE_AT_COPY = ['input_sources']
 
     credential_type = models.ForeignKey(
         'CredentialType',
@@ -94,6 +95,10 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
         on_delete=models.CASCADE,
         help_text=_('Specify the type of credential you want to create. Refer '
                     'to the Ansible Tower documentation for details on each type.')
+    )
+    managed_by_tower = models.BooleanField(
+        default=False,
+        editable=False
     )
     organization = models.ForeignKey(
         'Organization',
@@ -135,6 +140,10 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
     def cloud(self):
         return self.credential_type.kind == 'cloud'
 
+    @property
+    def kubernetes(self):
+        return self.credential_type.kind == 'kubernetes'
+
     def get_absolute_url(self, request=None):
         return reverse('api:credential_detail', kwargs={'pk': self.pk}, request=request)
 
@@ -151,7 +160,7 @@ class Credential(PasswordFieldsModel, CommonModelNameNotUnique, ResourceMixin):
     @property
     def has_encrypted_ssh_key_data(self):
         try:
-            ssh_key_data = decrypt_field(self, 'ssh_key_data')
+            ssh_key_data = self.get_input('ssh_key_data')
         except AttributeError:
             return False
 
@@ -322,8 +331,11 @@ class CredentialType(CommonModelNameNotUnique):
         ('net', _('Network')),
         ('scm', _('Source Control')),
         ('cloud', _('Cloud')),
+        ('token', _('Personal Access Token')),
         ('insights', _('Insights')),
         ('external', _('External')),
+        ('kubernetes', _('Kubernetes')),
+        ('galaxy', _('Galaxy/Automation Hub')),
     )
 
     kind = models.CharField(
@@ -507,8 +519,11 @@ class CredentialType(CommonModelNameNotUnique):
         # If any file templates are provided, render the files and update the
         # special `tower` template namespace so the filename can be
         # referenced in other injectors
+
+        sandbox_env = sandbox.ImmutableSandboxedEnvironment()
+
         for file_label, file_tmpl in file_tmpls.items():
-            data = Template(file_tmpl).render(**namespace)
+            data = sandbox_env.from_string(file_tmpl).render(**namespace)
             _, path = tempfile.mkstemp(dir=private_data_dir)
             with open(path, 'w') as f:
                 f.write(data)
@@ -530,14 +545,14 @@ class CredentialType(CommonModelNameNotUnique):
             except ValidationError as e:
                 logger.error('Ignoring prohibited env var {}, reason: {}'.format(env_var, e))
                 continue
-            env[env_var] = Template(tmpl).render(**namespace)
-            safe_env[env_var] = Template(tmpl).render(**safe_namespace)
+            env[env_var] = sandbox_env.from_string(tmpl).render(**namespace)
+            safe_env[env_var] = sandbox_env.from_string(tmpl).render(**safe_namespace)
 
         if 'INVENTORY_UPDATE_ID' not in env:
             # awx-manage inventory_update does not support extra_vars via -e
             extra_vars = {}
             for var_name, tmpl in self.injectors.get('extra_vars', {}).items():
-                extra_vars[var_name] = Template(tmpl).render(**namespace)
+                extra_vars[var_name] = sandbox_env.from_string(tmpl).render(**namespace)
 
             def build_extra_vars_file(vars, private_dir):
                 handle, path = tempfile.mkstemp(dir = private_dir)
@@ -633,9 +648,6 @@ ManagedCredentialType(
             'secret': True,
             'ask_at_runtime': True
         }],
-        'dependencies': {
-            'ssh_key_unlock': ['ssh_key_data'],
-        }
     }
 )
 
@@ -667,9 +679,6 @@ ManagedCredentialType(
             'type': 'string',
             'secret': True
         }],
-        'dependencies': {
-            'ssh_key_unlock': ['ssh_key_data'],
-        }
     }
 )
 
@@ -738,7 +747,6 @@ ManagedCredentialType(
             'secret': True,
         }],
         'dependencies': {
-            'ssh_key_unlock': ['ssh_key_data'],
             'authorize_password': ['authorize'],
         },
         'required': ['username'],
@@ -800,6 +808,10 @@ ManagedCredentialType(
             'label': ugettext_noop('Project (Tenant Name)'),
             'type': 'string',
         }, {
+            'id': 'project_domain_name',
+            'label': ugettext_noop('Project (Domain Name)'),
+            'type': 'string',
+        }, {
             'id': 'domain',
             'label': ugettext_noop('Domain Name'),
             'type': 'string',
@@ -807,6 +819,11 @@ ManagedCredentialType(
                                        'It is only needed for Keystone v3 authentication '
                                        'URLs. Refer to Ansible Tower documentation for '
                                        'common scenarios.')
+        }, {
+            'id': 'region',
+            'label': ugettext_noop('Region Name'),
+            'type': 'string',
+            'help_text': ugettext_noop('For some cloud providers, like OVH, region must be specified'),
         }, {
             'id': 'verify_ssl',
             'label': ugettext_noop('Verify SSL'),
@@ -855,33 +872,6 @@ ManagedCredentialType(
             'type': 'string',
             'help_text': ugettext_noop('Enter the URL that corresponds to your Red Hat '
                                        'Satellite 6 server. For example, https://satellite.example.org')
-        }, {
-            'id': 'username',
-            'label': ugettext_noop('Username'),
-            'type': 'string'
-        }, {
-            'id': 'password',
-            'label': ugettext_noop('Password'),
-            'type': 'string',
-            'secret': True,
-        }],
-        'required': ['host', 'username', 'password'],
-    }
-)
-
-ManagedCredentialType(
-    namespace='cloudforms',
-    kind='cloud',
-    name=ugettext_noop('Red Hat CloudForms'),
-    managed_by_tower=True,
-    inputs={
-        'fields': [{
-            'id': 'host',
-            'label': ugettext_noop('CloudForms URL'),
-            'type': 'string',
-            'help_text': ugettext_noop('Enter the URL for the virtual machine that '
-                                       'corresponds to your CloudForms instance. '
-                                       'For example, https://cloudforms.example.org')
         }, {
             'id': 'username',
             'label': ugettext_noop('Username'),
@@ -976,6 +966,40 @@ ManagedCredentialType(
 )
 
 ManagedCredentialType(
+    namespace='github_token',
+    kind='token',
+    name=ugettext_noop('GitHub Personal Access Token'),
+    managed_by_tower=True,
+    inputs={
+        'fields': [{
+            'id': 'token',
+            'label': ugettext_noop('Token'),
+            'type': 'string',
+            'secret': True,
+            'help_text': ugettext_noop('This token needs to come from your profile settings in GitHub')
+        }],
+        'required': ['token'],
+    },
+)
+
+ManagedCredentialType(
+    namespace='gitlab_token',
+    kind='token',
+    name=ugettext_noop('GitLab Personal Access Token'),
+    managed_by_tower=True,
+    inputs={
+        'fields': [{
+            'id': 'token',
+            'label': ugettext_noop('Token'),
+            'type': 'string',
+            'secret': True,
+            'help_text': ugettext_noop('This token needs to come from your profile settings in GitLab')
+        }],
+        'required': ['token'],
+    },
+)
+
+ManagedCredentialType(
     namespace='insights',
     kind='insights',
     name=ugettext_noop('Insights'),
@@ -1065,28 +1089,102 @@ ManagedCredentialType(
         }, {
             'id': 'username',
             'label': ugettext_noop('Username'),
-            'type': 'string'
+            'type': 'string',
+            'help_text': ugettext_noop('The Ansible Tower user to authenticate as.'
+                                       'This should not be set if an OAuth token is being used.')
         }, {
             'id': 'password',
             'label': ugettext_noop('Password'),
             'type': 'string',
             'secret': True,
         }, {
+            'id': 'oauth_token',
+            'label': ugettext_noop('OAuth Token'),
+            'type': 'string',
+            'secret': True,
+            'help_text': ugettext_noop('An OAuth token to use to authenticate to Tower with.'
+                                       'This should not be set if username/password are being used.')
+        }, {
             'id': 'verify_ssl',
             'label': ugettext_noop('Verify SSL'),
             'type': 'boolean',
             'secret': False
         }],
-        'required': ['host', 'username', 'password'],
+        'required': ['host'],
     },
     injectors={
         'env': {
             'TOWER_HOST': '{{host}}',
             'TOWER_USERNAME': '{{username}}',
             'TOWER_PASSWORD': '{{password}}',
-            'TOWER_VERIFY_SSL': '{{verify_ssl}}'
+            'TOWER_VERIFY_SSL': '{{verify_ssl}}',
+            'TOWER_OAUTH_TOKEN': '{{oauth_token}}'
         }
     },
+)
+
+
+ManagedCredentialType(
+    namespace='kubernetes_bearer_token',
+    kind='kubernetes',
+    name=ugettext_noop('OpenShift or Kubernetes API Bearer Token'),
+    inputs={
+        'fields': [{
+            'id': 'host',
+            'label': ugettext_noop('OpenShift or Kubernetes API Endpoint'),
+            'type': 'string',
+            'help_text': ugettext_noop('The OpenShift or Kubernetes API Endpoint to authenticate with.')
+        },{
+            'id': 'bearer_token',
+            'label': ugettext_noop('API authentication bearer token'),
+            'type': 'string',
+            'secret': True,
+        },{
+            'id': 'verify_ssl',
+            'label': ugettext_noop('Verify SSL'),
+            'type': 'boolean',
+            'default': True,
+        },{
+            'id': 'ssl_ca_cert',
+            'label': ugettext_noop('Certificate Authority data'),
+            'type': 'string',
+            'secret': True,
+            'multiline': True,
+        }],
+        'required': ['host', 'bearer_token'],
+    }
+)
+
+
+ManagedCredentialType(
+    namespace='galaxy_api_token',
+    kind='galaxy',
+    name=ugettext_noop('Ansible Galaxy/Automation Hub API Token'),
+    inputs={
+        'fields': [{
+            'id': 'url',
+            'label': ugettext_noop('Galaxy Server URL'),
+            'type': 'string',
+            'help_text': ugettext_noop('The URL of the Galaxy instance to connect to.')
+        },{
+            'id': 'auth_url',
+            'label': ugettext_noop('Auth Server URL'),
+            'type': 'string',
+            'help_text': ugettext_noop(
+                'The URL of a Keycloak server token_endpoint, if using '
+                'SSO auth.'
+            )
+        },{
+            'id': 'token',
+            'label': ugettext_noop('API Token'),
+            'type': 'string',
+            'secret': True,
+            'help_text': ugettext_noop(
+                'A token to use for authentication against the Galaxy instance.'
+            )
+        }],
+        'required': ['url'],
+    }
 )
 
 
@@ -1096,6 +1194,8 @@ class CredentialInputSource(PrimordialModel):
         app_label = 'main'
         unique_together = (('target_credential', 'input_field_name'),)
         ordering = ('target_credential', 'source_credential', 'input_field_name',)
+
+    FIELDS_TO_PRESERVE_AT_COPY = ['source_credential', 'metadata', 'input_field_name']
 
     target_credential = models.ForeignKey(
         'Credential',

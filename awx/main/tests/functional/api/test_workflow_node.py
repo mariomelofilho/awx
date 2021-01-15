@@ -72,12 +72,24 @@ def test_node_accepts_prompted_fields(inventory, project, workflow_job_template,
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("field_name, field_value", [
+    ('all_parents_must_converge', True),
+    ('all_parents_must_converge', False),
+])
+def test_create_node_with_field(field_name, field_value, workflow_job_template, post, admin_user):
+    url = reverse('api:workflow_job_template_workflow_nodes_list',
+                  kwargs={'pk': workflow_job_template.pk})
+    res = post(url, {field_name: field_value}, user=admin_user, expect=201)
+    assert res.data[field_name] == field_value
+
+
+@pytest.mark.django_db
 class TestApprovalNodes():
     def test_approval_node_creation(self, post, approval_node, admin_user):
         url = reverse('api:workflow_job_template_node_create_approval',
                       kwargs={'pk': approval_node.pk, 'version': 'v2'})
         post(url, {'name': 'Test', 'description': 'Approval Node', 'timeout': 0},
-             user=admin_user, expect=200)
+             user=admin_user, expect=201)
 
         approval_node = WorkflowJobTemplateNode.objects.get(pk=approval_node.pk)
         assert isinstance(approval_node.unified_job_template, WorkflowApprovalTemplate)
@@ -96,9 +108,9 @@ class TestApprovalNodes():
         assert {'name': ['This field may not be blank.']} == json.loads(r.content)
 
     @pytest.mark.parametrize("is_admin, is_org_admin, status", [
-        [True, False, 200], # if they're a WFJT admin, they get a 200
+        [True, False, 201], # if they're a WFJT admin, they get a 201
         [False, False, 403], # if they're not a WFJT *nor* org admin, they get a 403
-        [False, True, 200], # if they're an organization admin, they get a 200
+        [False, True, 201], # if they're an organization admin, they get a 201
     ])
     def test_approval_node_creation_rbac(self, post, approval_node, alice, is_admin, is_org_admin, status):
         url = reverse('api:workflow_job_template_node_create_approval',
@@ -153,7 +165,7 @@ class TestApprovalNodes():
         url = reverse('api:workflow_job_template_node_create_approval',
                       kwargs={'pk': node.pk, 'version': 'v2'})
         post(url, {'name': 'Approve Test', 'description': '', 'timeout': 0},
-             user=admin_user, expect=200)
+             user=admin_user, expect=201)
         post(reverse('api:workflow_job_template_launch', kwargs={'pk': wfjt.pk}),
              user=admin_user, expect=201)
         wf_job = WorkflowJob.objects.first()
@@ -183,7 +195,7 @@ class TestApprovalNodes():
         url = reverse('api:workflow_job_template_node_create_approval',
                       kwargs={'pk': node.pk, 'version': 'v2'})
         post(url, {'name': 'Deny Test', 'description': '', 'timeout': 0},
-             user=admin_user, expect=200)
+             user=admin_user, expect=201)
         post(reverse('api:workflow_job_template_launch', kwargs={'pk': wfjt.pk}),
              user=admin_user, expect=201)
         wf_job = WorkflowJob.objects.first()

@@ -7,8 +7,8 @@ import json
 import re
 import urllib.parse
 
-from jinja2 import Environment, StrictUndefined
-from jinja2.exceptions import UndefinedError, TemplateSyntaxError
+from jinja2 import sandbox, StrictUndefined
+from jinja2.exceptions import UndefinedError, TemplateSyntaxError, SecurityError
 
 # Django
 from django.contrib.postgres.fields import JSONField as upstream_JSONBField
@@ -50,13 +50,14 @@ from awx.main.models.rbac import (
     batch_role_ancestor_rebuilding, Role,
     ROLE_SINGLETON_SYSTEM_ADMINISTRATOR, ROLE_SINGLETON_SYSTEM_AUDITOR
 )
-from awx.main.constants import ENV_BLACKLIST
+from awx.main.constants import ENV_BLOCKLIST
 from awx.main import utils
 
 
 __all__ = ['AutoOneToOneField', 'ImplicitRoleField', 'JSONField',
            'SmartFilterField', 'OrderedManyToManyField',
-           'update_role_parentage_for_instance', 'is_implicit_parent']
+           'update_role_parentage_for_instance',
+           'is_implicit_parent']
 
 
 # Provide a (better) custom error message for enum jsonschema validation
@@ -140,8 +141,9 @@ def resolve_role_field(obj, field):
         return []
 
     if len(field_components) == 1:
-        role_cls = str(utils.get_current_apps().get_model('main', 'Role'))
-        if not str(type(obj)) == role_cls:
+        # use extremely generous duck typing to accomidate all possible forms
+        # of the model that may be used during various migrations
+        if obj._meta.model_name != 'role' or obj._meta.app_label != 'main':
             raise Exception(smart_text('{} refers to a {}, not a Role'.format(field, type(obj))))
         ret.append(obj.id)
     else:
@@ -197,18 +199,27 @@ def update_role_parentage_for_instance(instance):
     updates the parents listing for all the roles
     of a given instance if they have changed
     '''
+    parents_removed = set()
+    parents_added = set()
     for implicit_role_field in getattr(instance.__class__, '__implicit_role_fields'):
         cur_role = getattr(instance, implicit_role_field.name)
         original_parents = set(json.loads(cur_role.implicit_parents))
         new_parents = implicit_role_field._resolve_parent_roles(instance)
-        cur_role.parents.remove(*list(original_parents - new_parents))
-        cur_role.parents.add(*list(new_parents - original_parents))
+        removals = original_parents - new_parents
+        if removals:
+            cur_role.parents.remove(*list(removals))
+            parents_removed.add(cur_role.pk)
+        additions = new_parents - original_parents
+        if additions:
+            cur_role.parents.add(*list(additions))
+            parents_added.add(cur_role.pk)
         new_parents_list = list(new_parents)
         new_parents_list.sort()
         new_parents_json = json.dumps(new_parents_list)
         if cur_role.implicit_parents != new_parents_json:
             cur_role.implicit_parents = new_parents_json
-            cur_role.save()
+            cur_role.save(update_fields=['implicit_parents'])
+    return (parents_added, parents_removed)
 
 
 class ImplicitRoleDescriptor(ForwardManyToOneDescriptor):
@@ -256,20 +267,18 @@ class ImplicitRoleField(models.ForeignKey):
             field_names = [field_names]
 
         for field_name in field_names:
-            # Handle the OR syntax for role parents
-            if type(field_name) == tuple:
-                continue
-
-            if type(field_name) == bytes:
-                field_name = field_name.decode('utf-8')
 
             if field_name.startswith('singleton:'):
                 continue
 
             field_name, sep, field_attr = field_name.partition('.')
-            field = getattr(cls, field_name)
+            # Non existent fields will occur if ever a parent model is
+            # moved inside a migration, needed for job_template_organization_field
+            # migration in particular
+            # consistency is assured by unit test awx.main.tests.functional
+            field = getattr(cls, field_name, None)
 
-            if type(field) is ReverseManyToOneDescriptor or \
+            if field and type(field) is ReverseManyToOneDescriptor or \
                type(field) is ManyToManyDescriptor:
 
                 if '.' in field_attr:
@@ -628,6 +637,14 @@ class CredentialInputField(JSONSchemaField):
             else:
                 decrypted_values[k] = v
 
+        # don't allow secrets with $encrypted$ on new object creation
+        if not model_instance.pk:
+            for field in model_instance.credential_type.secret_fields:
+                if value.get(field) == '$encrypted$':
+                    raise serializers.ValidationError({
+                        self.name: [f'$encrypted$ is a reserved keyword, and cannot be used for {field}.']
+                    })
+
         super(JSONSchemaField, self).validate(decrypted_values, model_instance)
         errors = {}
         for error in Draft4Validator(
@@ -861,9 +878,9 @@ class CredentialTypeInjectorField(JSONSchemaField):
                   'use is not allowed in credentials.').format(env_var),
                 code='invalid', params={'value': env_var},
             )
-        if env_var in ENV_BLACKLIST:
+        if env_var in ENV_BLOCKLIST:
             raise django_exceptions.ValidationError(
-                _('Environment variable {} is blacklisted from use in credentials.').format(env_var),
+                _('Environment variable {} is not allowed to be used in credentials.').format(env_var),
                 code='invalid', params={'value': env_var},
             )
 
@@ -923,7 +940,7 @@ class CredentialTypeInjectorField(JSONSchemaField):
                     self.validate_env_var_allowed(key)
             for key, tmpl in injector.items():
                 try:
-                    Environment(
+                    sandbox.ImmutableSandboxedEnvironment(
                         undefined=StrictUndefined
                     ).from_string(tmpl).render(valid_namespace)
                 except UndefinedError as e:
@@ -932,6 +949,10 @@ class CredentialTypeInjectorField(JSONSchemaField):
                             sub_key=key, error_msg=e),
                         code='invalid',
                         params={'value': value},
+                    )
+                except SecurityError as e:
+                    raise django_exceptions.ValidationError(
+                        _('Encountered unsafe code execution: {}').format(e)
                     )
                 except TemplateSyntaxError as e:
                     raise django_exceptions.ValidationError(

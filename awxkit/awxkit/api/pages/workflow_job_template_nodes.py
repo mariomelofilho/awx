@@ -10,6 +10,7 @@ from . import page
 class WorkflowJobTemplateNode(HasCreate, base.Base):
 
     dependencies = [WorkflowJobTemplate, UnifiedJobTemplate]
+    NATURAL_KEY = ('workflow_job_template', 'identifier')
 
     def payload(self, workflow_job_template, unified_job_template, **kwargs):
         if not unified_job_template:
@@ -25,11 +26,14 @@ class WorkflowJobTemplateNode(HasCreate, base.Base):
             'diff_mode',
             'extra_data',
             'limit',
+            'scm_branch',
             'job_tags',
             'job_type',
             'skip_tags',
             'verbosity',
-            'extra_data')
+            'extra_data',
+            'identifier',
+            'all_parents_must_converge')
 
         update_payload(payload, optional_fields, kwargs)
 
@@ -72,21 +76,21 @@ class WorkflowJobTemplateNode(HasCreate, base.Base):
             WorkflowJobTemplateNodes(
                 self.connection).post(payload))
 
-    def _add_node(self, endpoint, unified_job_template):
+    def _add_node(self, endpoint, unified_job_template, **kwargs):
         node = endpoint.post(
-            dict(unified_job_template=unified_job_template.id))
+            dict(unified_job_template=unified_job_template.id, **kwargs))
         node.create_and_update_dependencies(
             self.ds.workflow_job_template, unified_job_template)
         return node
 
-    def add_always_node(self, unified_job_template):
-        return self._add_node(self.related.always_nodes, unified_job_template)
+    def add_always_node(self, unified_job_template, **kwargs):
+        return self._add_node(self.related.always_nodes, unified_job_template, **kwargs)
 
-    def add_failure_node(self, unified_job_template):
-        return self._add_node(self.related.failure_nodes, unified_job_template)
+    def add_failure_node(self, unified_job_template, **kwargs):
+        return self._add_node(self.related.failure_nodes, unified_job_template, **kwargs)
 
-    def add_success_node(self, unified_job_template):
-        return self._add_node(self.related.success_nodes, unified_job_template)
+    def add_success_node(self, unified_job_template, **kwargs):
+        return self._add_node(self.related.success_nodes, unified_job_template, **kwargs)
 
     def add_credential(self, credential):
         with suppress(exc.NoContent):
@@ -113,10 +117,14 @@ class WorkflowJobTemplateNode(HasCreate, base.Base):
         self.related.create_approval_template.post(kwargs)
         return self.get()
 
+    def get_job_node(self, workflow_job):
+        candidates = workflow_job.get_related('workflow_nodes', identifier=self.identifier)
+        return candidates.results.pop()
+
 
 page.register_page([resources.workflow_job_template_node,
-                    (resources.workflow_job_template_nodes,
-                     'post')],
+                    (resources.workflow_job_template_nodes, 'post'),
+                    (resources.workflow_job_template_workflow_nodes, 'post')],
                    WorkflowJobTemplateNode)
 
 

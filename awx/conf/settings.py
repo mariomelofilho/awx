@@ -1,14 +1,9 @@
 # Python
-from collections import namedtuple
 import contextlib
 import logging
-import re
 import sys
 import threading
 import time
-import traceback
-import urllib.parse
-from io import StringIO
 
 # Django
 from django.conf import LazySettings
@@ -16,11 +11,13 @@ from django.conf import settings, UserSettingsHolder
 from django.core.cache import cache as django_cache
 from django.core.exceptions import ImproperlyConfigured
 from django.db import transaction, connection
-from django.db.utils import Error as DBError
+from django.db.utils import Error as DBError, ProgrammingError
 from django.utils.functional import cached_property
 
 # Django REST Framework
 from rest_framework.fields import empty, SkipField
+
+import cachetools
 
 # Tower
 from awx.main.utils import encrypt_field, decrypt_field
@@ -33,21 +30,23 @@ from awx.conf.migrations._reencrypt import decrypt_field as old_decrypt_field
 
 logger = logging.getLogger('awx.conf.settings')
 
+SETTING_MEMORY_TTL = 5 if 'callback_receiver' in ' '.join(sys.argv) else 0
+
 # Store a special value to indicate when a setting is not set in the database.
 SETTING_CACHE_NOTSET = '___notset___'
 
-# Cannot store None in memcached; use a special value instead to indicate None.
+# Cannot store None in cache; use a special value instead to indicate None.
 # If the special value for None is the same as the "not set" value, then a value
 # of None will be equivalent to the setting not being set (and will raise an
 # AttributeError if there is no other default defined).
 # SETTING_CACHE_NONE = '___none___'
 SETTING_CACHE_NONE = SETTING_CACHE_NOTSET
 
-# Cannot store empty list/tuple in memcached; use a special value instead to
+# Cannot store empty list/tuple in cache; use a special value instead to
 # indicate an empty list.
 SETTING_CACHE_EMPTY_LIST = '___[]___'
 
-# Cannot store empty dict in memcached; use a special value instead to indicate
+# Cannot store empty dict in cache; use a special value instead to indicate
 # an empty dict.
 SETTING_CACHE_EMPTY_DICT = '___{}___'
 
@@ -58,15 +57,6 @@ SETTING_CACHE_TIMEOUT = 60
 SETTING_CACHE_DEFAULTS = True
 
 __all__ = ['SettingsWrapper', 'get_settings_to_cache', 'SETTING_CACHE_NOTSET']
-
-
-def normalize_broker_url(value):
-    parts = value.rsplit('@', 1)
-    match = re.search('(amqp://[^:]+:)(.*)', parts[0])
-    if match:
-        prefix, password = match.group(1), match.group(2)
-        parts[0] = prefix + urllib.parse.quote(password)
-    return '@'.join(parts)
 
 
 @contextlib.contextmanager
@@ -88,43 +78,21 @@ def _ctit_db_wrapper(trans_safe=False):
                     logger.debug('Obtaining database settings in spite of broken transaction.')
                     transaction.set_rollback(False)
         yield
-    except DBError:
-        # We want the _full_ traceback with the context
-        # First we get the current call stack, which constitutes the "top",
-        # it has the context up to the point where the context manager is used
-        top_stack = StringIO()
-        traceback.print_stack(file=top_stack)
-        top_lines = top_stack.getvalue().strip('\n').split('\n')
-        top_stack.close()
-        # Get "bottom" stack from the local error that happened
-        # inside of the "with" block this wraps
-        exc_type, exc_value, exc_traceback = sys.exc_info()
-        bottom_stack = StringIO()
-        traceback.print_tb(exc_traceback, file=bottom_stack)
-        bottom_lines = bottom_stack.getvalue().strip('\n').split('\n')
-        # Glue together top and bottom where overlap is found
-        bottom_cutoff = 0
-        for i, line in enumerate(bottom_lines):
-            if line in top_lines:
-                # start of overlapping section, take overlap from bottom
-                top_lines = top_lines[:top_lines.index(line)]
-                bottom_cutoff = i
-                break
-        bottom_lines = bottom_lines[bottom_cutoff:]
-        tb_lines = top_lines + bottom_lines
-
-        tb_string = '\n'.join(
-            ['Traceback (most recent call last):'] +
-            tb_lines +
-            ['{}: {}'.format(exc_type.__name__, str(exc_value))]
-        )
-        bottom_stack.close()
-        # Log the combined stack
+    except DBError as exc:
         if trans_safe:
-            if 'check_migrations' not in sys.argv:
-                logger.debug('Database settings are not available, using defaults, error:\n{}'.format(tb_string))
+            if 'migrate' not in sys.argv and 'check_migrations' not in sys.argv:
+                level = logger.exception
+                if isinstance(exc, ProgrammingError):
+                    if 'relation' in str(exc) and 'does not exist' in str(exc):
+                        # this generally means we can't fetch Tower configuration
+                        # because the database hasn't actually finished migrating yet;
+                        # this is usually a sign that a service in a container (such as ws_broadcast)
+                        # has come up *before* the database has finished migrating, and
+                        # especially that the conf.settings table doesn't exist yet
+                        level = logger.debug
+                level('Database settings are not available, using defaults.')
         else:
-            logger.debug('Error modifying something related to database settings.\n{}'.format(tb_string))
+            logger.exception('Error modifying something related to database settings.')
     finally:
         if trans_safe and is_atomic and rollback_set:
             transaction.set_rollback(rollback_set)
@@ -134,6 +102,15 @@ def filter_sensitive(registry, key, value):
     if registry.is_setting_encrypted(key):
         return '$encrypted$'
     return value
+
+
+class TransientSetting(object):
+
+    __slots__ = ('pk', 'value')
+
+    def __init__(self, pk, value):
+        self.pk = pk
+        self.value = value
 
 
 class EncryptedCacheProxy(object):
@@ -163,7 +140,6 @@ class EncryptedCacheProxy(object):
     def get(self, key, **kwargs):
         value = self.cache.get(key, **kwargs)
         value = self._handle_encryption(self.decrypter, key, value)
-        logger.debug('cache get(%r, %r) -> %r', key, empty, filter_sensitive(self.registry, key, value))
         return value
 
     def set(self, key, value, log=True, **kwargs):
@@ -186,8 +162,6 @@ class EncryptedCacheProxy(object):
             self.set(key, value, log=False, **kwargs)
 
     def _handle_encryption(self, method, key, value):
-        TransientSetting = namedtuple('TransientSetting', ['pk', 'value'])
-
         if value is not empty and self.registry.is_setting_encrypted(key):
             # If the setting exists in the database, we'll use its primary key
             # as part of the AES key when encrypting/decrypting
@@ -436,6 +410,7 @@ class SettingsWrapper(UserSettingsHolder):
     def SETTINGS_MODULE(self):
         return self._get_default('SETTINGS_MODULE')
 
+    @cachetools.cached(cache=cachetools.TTLCache(maxsize=2048, ttl=SETTING_MEMORY_TTL))
     def __getattr__(self, name):
         value = empty
         if name in self.all_supported_settings:
@@ -443,22 +418,13 @@ class SettingsWrapper(UserSettingsHolder):
                 value = self._get_local(name)
         if value is not empty:
             return value
-        value = self._get_default(name)
-        # sometimes users specify RabbitMQ passwords that contain
-        # unescaped : and @ characters that confused urlparse, e.g.,
-        # amqp://guest:a@ns:ibl3#@localhost:5672//
-        #
-        # detect these scenarios, and automatically escape the user's
-        # password so it just works
-        if name == 'BROKER_URL':
-            value = normalize_broker_url(value)
-        return value
+        return self._get_default(name)
 
     def _set_local(self, name, value):
         field = self.registry.get_setting_field(name)
         if field.read_only:
             logger.warning('Attempt to set read only setting "%s".', name)
-            raise ImproperlyConfigured('Setting "%s" is read only.'.format(name))
+            raise ImproperlyConfigured('Setting "{}" is read only.'.format(name))
 
         try:
             data = field.to_representation(value)
@@ -489,7 +455,7 @@ class SettingsWrapper(UserSettingsHolder):
         field = self.registry.get_setting_field(name)
         if field.read_only:
             logger.warning('Attempt to delete read only setting "%s".', name)
-            raise ImproperlyConfigured('Setting "%s" is read only.'.format(name))
+            raise ImproperlyConfigured('Setting "{}" is read only.'.format(name))
         for setting in Setting.objects.filter(key=name, user__isnull=True):
             setting.delete()
             # pre_delete handler will delete from cache.

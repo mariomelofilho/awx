@@ -24,6 +24,7 @@ notification_types = (
 class NotificationTemplate(HasCopy, HasCreate, base.Base):
 
     dependencies = [Organization]
+    NATURAL_KEY = ('organization', 'name')
 
     def test(self):
         """Create test notification"""
@@ -209,8 +210,10 @@ page.register_page([resources.notification_template,
                     (resources.notification_templates, 'post'),
                     (resources.notification_template_copy, 'post'),
                     resources.notification_template_any,
+                    resources.notification_template_started,
                     resources.notification_template_error,
-                    resources.notification_template_success], NotificationTemplate)
+                    resources.notification_template_success,
+                    resources.notification_template_approval], NotificationTemplate)
 
 
 class NotificationTemplates(page.PageList, NotificationTemplate):
@@ -219,10 +222,21 @@ class NotificationTemplates(page.PageList, NotificationTemplate):
 
 
 page.register_page([resources.notification_templates,
+                    resources.related_notification_templates,
                     resources.notification_templates_any,
+                    resources.notification_templates_started,
                     resources.notification_templates_error,
-                    resources.notification_templates_success],
+                    resources.notification_templates_success,
+                    resources.notification_templates_approvals],
                    NotificationTemplates)
+
+
+class NotificationTemplateCopy(base.Base):
+
+    pass
+
+
+page.register_page(resources.notification_template_copy, NotificationTemplateCopy)
 
 
 class NotificationTemplateTest(base.Base):

@@ -12,18 +12,17 @@ from django.core.mail.message import EmailMessage
 from django.db import connection
 from django.utils.translation import ugettext_lazy as _
 from django.utils.encoding import smart_str, force_text
-from jinja2 import sandbox
+from jinja2 import sandbox, ChainableUndefined
 from jinja2.exceptions import TemplateSyntaxError, UndefinedError, SecurityError
 
 # AWX
 from awx.api.versioning import reverse
-from awx.main.models.base import CommonModelNameNotUnique, CreatedModifiedModel
+from awx.main.models.base import CommonModelNameNotUnique, CreatedModifiedModel, prevent_search
 from awx.main.utils import encrypt_field, decrypt_field, set_environ
 from awx.main.notifications.email_backend import CustomEmailBackend
 from awx.main.notifications.slack_backend import SlackBackend
 from awx.main.notifications.twilio_backend import TwilioBackend
 from awx.main.notifications.pagerduty_backend import PagerDutyBackend
-from awx.main.notifications.hipchat_backend import HipChatBackend
 from awx.main.notifications.webhook_backend import WebhookBackend
 from awx.main.notifications.mattermost_backend import MattermostBackend
 from awx.main.notifications.grafana_backend import GrafanaBackend
@@ -44,7 +43,6 @@ class NotificationTemplate(CommonModelNameNotUnique):
                           ('twilio', _('Twilio'), TwilioBackend),
                           ('pagerduty', _('Pagerduty'), PagerDutyBackend),
                           ('grafana', _('Grafana'), GrafanaBackend),
-                          ('hipchat', _('HipChat'), HipChatBackend),
                           ('webhook', _('Webhook'), WebhookBackend),
                           ('mattermost', _('Mattermost'), MattermostBackend),
                           ('rocketchat', _('Rocket.Chat'), RocketChatBackend),
@@ -70,10 +68,10 @@ class NotificationTemplate(CommonModelNameNotUnique):
         choices=NOTIFICATION_TYPE_CHOICES,
     )
 
-    notification_configuration = JSONField(blank=False)
+    notification_configuration = prevent_search(JSONField(blank=False))
 
     def default_messages():
-        return {'started': None, 'success': None, 'error': None}
+        return {'started': None, 'success': None, 'error': None, 'workflow_approval': None}
 
     messages = JSONField(
         null=True,
@@ -92,25 +90,6 @@ class NotificationTemplate(CommonModelNameNotUnique):
     def get_message(self, condition):
         return self.messages.get(condition, {})
 
-    def build_notification_message(self, event_type, context):
-        env = sandbox.ImmutableSandboxedEnvironment()
-        templates = self.get_message(event_type)
-        msg_template = templates.get('message', {})
-
-        try:
-            notification_subject = env.from_string(msg_template).render(**context)
-        except (TemplateSyntaxError, UndefinedError, SecurityError):
-            notification_subject = ''
-
-
-        msg_body = templates.get('body', {})
-        try:
-            notification_body = env.from_string(msg_body).render(**context)
-        except (TemplateSyntaxError, UndefinedError, SecurityError):
-            notification_body = ''
-
-        return (notification_subject, notification_body)
-
     def get_absolute_url(self, request=None):
         return reverse('api:notification_template_detail', kwargs={'pk': self.pk}, request=request)
 
@@ -128,18 +107,33 @@ class NotificationTemplate(CommonModelNameNotUnique):
             old_messages = old_nt.messages
             new_messages = self.messages
 
+            def merge_messages(local_old_messages, local_new_messages, local_event):
+                if local_new_messages.get(local_event, {}) and local_old_messages.get(local_event, {}):
+                    local_old_event_msgs = local_old_messages[local_event]
+                    local_new_event_msgs = local_new_messages[local_event]
+                    for msg_type in ['message', 'body']:
+                        if msg_type not in local_new_event_msgs and local_old_event_msgs.get(msg_type, None):
+                            local_new_event_msgs[msg_type] = local_old_event_msgs[msg_type]
             if old_messages is not None and new_messages is not None:
-                for event in ['started', 'success', 'error']:
+                for event in ('started', 'success', 'error', 'workflow_approval'):
                     if not new_messages.get(event, {}) and old_messages.get(event, {}):
                         new_messages[event] = old_messages[event]
                         continue
-                    if new_messages.get(event, {}) and old_messages.get(event, {}):
-                        old_event_msgs = old_messages[event]
-                        new_event_msgs = new_messages[event]
-                        for msg_type in ['message', 'body']:
-                            if msg_type not in new_event_msgs and old_event_msgs.get(msg_type, None):
-                                new_event_msgs[msg_type] = old_event_msgs[msg_type]
+
+                    if event == 'workflow_approval' and old_messages.get('workflow_approval', None):
+                        new_messages.setdefault('workflow_approval', {})
+                        for subevent in ('running', 'approved', 'timed_out', 'denied'):
+                            old_wfa_messages = old_messages['workflow_approval']
+                            new_wfa_messages = new_messages['workflow_approval']
+                            if not new_wfa_messages.get(subevent, {}) and old_wfa_messages.get(subevent, {}):
+                                new_wfa_messages[subevent] = old_wfa_messages[subevent]
+                                continue
+                            if old_wfa_messages:
+                                merge_messages(old_wfa_messages, new_wfa_messages, subevent)
+                    else:
+                        merge_messages(old_messages, new_messages, event)
                     new_messages.setdefault(event, None)
+
 
         for field in filter(lambda x: self.notification_class.init_parameters[x]['type'] == "password",
                             self.notification_class.init_parameters):
@@ -169,12 +163,12 @@ class NotificationTemplate(CommonModelNameNotUnique):
     def recipients(self):
         return self.notification_configuration[self.notification_class.recipient_parameter]
 
-    def generate_notification(self, subject, message):
+    def generate_notification(self, msg, body):
         notification = Notification(notification_template=self,
                                     notification_type=self.notification_type,
                                     recipients=smart_str(self.recipients),
-                                    subject=subject,
-                                    body=message)
+                                    subject=msg,
+                                    body=body)
         notification.save()
         return notification
 
@@ -268,26 +262,25 @@ class JobNotificationMixin(object):
                                'running': 'started',
                                'failed': 'error'}
     # Tree of fields that can be safely referenced in a notification message
-    JOB_FIELDS_WHITELIST = ['id', 'type', 'url', 'created', 'modified', 'name', 'description', 'job_type', 'playbook',
-                            'forks', 'limit', 'verbosity', 'job_tags', 'force_handlers', 'skip_tags', 'start_at_task',
-                            'timeout', 'use_fact_cache', 'launch_type', 'status', 'failed', 'started', 'finished',
-                            'elapsed', 'job_explanation', 'execution_node', 'controller_node', 'allow_simultaneous',
-                            'scm_revision', 'diff_mode', 'job_slice_number', 'job_slice_count', 'custom_virtualenv',
-                            {'host_status_counts': ['skipped', 'ok', 'changed', 'failures', 'dark']},
-                            {'playbook_counts': ['play_count', 'task_count']},
-                            {'summary_fields': [{'inventory': ['id', 'name', 'description', 'has_active_failures',
-                                                               'total_hosts', 'hosts_with_active_failures', 'total_groups',
-                                                               'groups_with_active_failures', 'has_inventory_sources',
-                                                               'total_inventory_sources', 'inventory_sources_with_failures',
-                                                               'organization_id', 'kind']},
-                                                {'project': ['id', 'name', 'description', 'status', 'scm_type']},
-                                                {'project_update': ['id', 'name', 'description', 'status', 'failed']},
-                                                {'job_template': ['id', 'name', 'description']},
-                                                {'unified_job_template': ['id', 'name', 'description', 'unified_job_type']},
-                                                {'instance_group': ['name', 'id']},
-                                                {'created_by': ['id', 'username', 'first_name', 'last_name']},
-                                                {'labels': ['count', 'results']},
-                                                {'source_workflow_job': ['description', 'elapsed', 'failed', 'id', 'name', 'status']}]}]
+    JOB_FIELDS_ALLOWED_LIST = ['id', 'type', 'url', 'created', 'modified', 'name', 'description', 'job_type', 'playbook',
+                               'forks', 'limit', 'verbosity', 'job_tags', 'force_handlers', 'skip_tags', 'start_at_task',
+                               'timeout', 'use_fact_cache', 'launch_type', 'status', 'failed', 'started', 'finished',
+                               'elapsed', 'job_explanation', 'execution_node', 'controller_node', 'allow_simultaneous',
+                               'scm_revision', 'diff_mode', 'job_slice_number', 'job_slice_count', 'custom_virtualenv',
+                               'approval_status', 'approval_node_name', 'workflow_url', 'scm_branch', 'artifacts',
+                               {'host_status_counts': ['skipped', 'ok', 'changed', 'failed', 'failures', 'dark'
+                                                       'processed', 'rescued', 'ignored']},
+                               {'summary_fields': [{'inventory': ['id', 'name', 'description', 'has_active_failures',
+                                                                  'total_hosts', 'hosts_with_active_failures', 'total_groups',
+                                                                  'has_inventory_sources',
+                                                                  'total_inventory_sources', 'inventory_sources_with_failures',
+                                                                  'organization_id', 'kind']},
+                                                   {'project': ['id', 'name', 'description', 'status', 'scm_type']},
+                                                   {'job_template': ['id', 'name', 'description']},
+                                                   {'unified_job_template': ['id', 'name', 'description', 'unified_job_type']},
+                                                   {'instance_group': ['name', 'id']},
+                                                   {'created_by': ['id', 'username', 'first_name', 'last_name']},
+                                                   {'labels': ['count', 'results']}]}]
 
     @classmethod
     def context_stub(cls):
@@ -295,6 +288,7 @@ class JobNotificationMixin(object):
         Context has the same structure as the context that will actually be used to render
         a notification message."""
         context = {'job': {'allow_simultaneous': False,
+                           'artifacts': {},
                            'controller_node': 'foo_controller',
                            'created': datetime.datetime(2018, 11, 13, 6, 4, 0, 0, tzinfo=datetime.timezone.utc),
                            'custom_virtualenv': 'my_venv',
@@ -306,7 +300,7 @@ class JobNotificationMixin(object):
                            'finished': False,
                            'force_handlers': False,
                            'forks': 0,
-                           'host_status_counts': {'skipped': 1, 'ok': 5, 'changed': 3, 'failures': 0, 'dark': 0},
+                           'host_status_counts': {'skipped': 1, 'ok': 5, 'changed': 3, 'failures': 0, 'dark': 0, 'failed': False, 'processed': 0, 'rescued': 0},
                            'id': 42,
                            'job_explanation': 'Sample job explanation',
                            'job_slice_count': 1,
@@ -317,8 +311,8 @@ class JobNotificationMixin(object):
                            'limit': 'bar_limit',
                            'modified': datetime.datetime(2018, 12, 13, 6, 4, 0, 0, tzinfo=datetime.timezone.utc),
                            'name': 'Stub JobTemplate',
-                           'playbook_counts': {'play_count': 5, 'task_count': 10},
                            'playbook': 'ping.yml',
+                           'scm_branch': '',
                            'scm_revision': '',
                            'skip_tags': '',
                            'start_at_task': '',
@@ -330,7 +324,6 @@ class JobNotificationMixin(object):
                                                              'username': 'admin'},
                                               'instance_group': {'id': 1, 'name': 'tower'},
                                               'inventory': {'description': 'Sample inventory description',
-                                                            'groups_with_active_failures': 0,
                                                             'has_active_failures': False,
                                                             'has_inventory_sources': False,
                                                             'hosts_with_active_failures': 0,
@@ -351,18 +344,10 @@ class JobNotificationMixin(object):
                                                           'name': 'Stub project',
                                                           'scm_type': 'git',
                                                           'status': 'successful'},
-                                              'project_update': {'id': 5, 'name': 'Stub Project Update', 'description': 'Project Update',
-                                                                 'status': 'running', 'failed': False},
                                               'unified_job_template': {'description': 'Sample unified job template description',
                                                                        'id': 39,
                                                                        'name': 'Stub Job Template',
-                                                                       'unified_job_type': 'job'},
-                                              'source_workflow_job': {'description': 'Sample workflow job description',
-                                                                      'elapsed': 0.000,
-                                                                      'failed': False,
-                                                                      'id': 88,
-                                                                      'name': 'Stub WorkflowJobTemplate',
-                                                                      'status': 'running'}},
+                                                                       'unified_job_type': 'job'}},
                            'timeout': 0,
                            'type': 'job',
                            'url': '/api/v2/jobs/13/',
@@ -370,7 +355,10 @@ class JobNotificationMixin(object):
                            'verbosity': 0},
                    'job_friendly_name': 'Job',
                    'url': 'https://towerhost/#/jobs/playbook/1010',
-                   'job_summary_dict': """{'url': 'https://towerhost/$/jobs/playbook/13',
+                   'approval_status': 'approved',
+                   'approval_node_name': 'Approve Me',
+                   'workflow_url': 'https://towerhost/#/workflows/1010',
+                   'job_metadata': """{'url': 'https://towerhost/$/jobs/playbook/13',
  'traceback': '',
  'status': 'running',
  'started': '2019-08-07T21:46:38.362630+00:00',
@@ -389,31 +377,45 @@ class JobNotificationMixin(object):
         return context
 
     def context(self, serialized_job):
-        """Returns a context that can be used for rendering notification messages.
-        Context contains whitelisted content retrieved from a serialized job object
-        (see JobNotificationMixin.JOB_FIELDS_WHITELIST), the job's friendly name,
+        """Returns a dictionary that can be used for rendering notification messages.
+        The context will contain allowed content retrieved from a serialized job object
+        (see JobNotificationMixin.JOB_FIELDS_ALLOWED_LIST the job's friendly name,
         and a url to the job run."""
-        context = {'job': {},
-                   'job_friendly_name': self.get_notification_friendly_name(),
-                   'url': self.get_ui_url(),
-                   'job_summary_dict': json.dumps(self.notification_data(), indent=4)}
+        job_context = {'host_status_counts': {}}
+        summary = None
+        if hasattr(self, 'job_host_summaries'):
+            summary = self.job_host_summaries.first()
+        if summary:
+            from awx.api.serializers import JobHostSummarySerializer
+            summary_data = JobHostSummarySerializer(summary).to_representation(summary)
+            job_context['host_status_counts'] = summary_data
+        context = {
+            'job': job_context,
+            'job_friendly_name': self.get_notification_friendly_name(),
+            'url': self.get_ui_url(),
+            'job_metadata': json.dumps(
+                self.notification_data(),
+                ensure_ascii=False,
+                indent=4
+            )
+        }
 
-        def build_context(node, fields, whitelisted_fields):
-            for safe_field in whitelisted_fields:
+        def build_context(node, fields, allowed_fields):
+            for safe_field in allowed_fields:
                 if type(safe_field) is dict:
-                    field, whitelist_subnode = safe_field.copy().popitem()
+                    field, allowed_subnode = safe_field.copy().popitem()
                     # ensure content present in job serialization
                     if field not in fields:
                         continue
                     subnode = fields[field]
                     node[field] = {}
-                    build_context(node[field], subnode, whitelist_subnode)
+                    build_context(node[field], subnode, allowed_subnode)
                 else:
                     # ensure content present in job serialization
                     if safe_field not in fields:
                         continue
                     node[safe_field] = fields[safe_field]
-        build_context(context['job'], serialized_job, self.JOB_FIELDS_WHITELIST)
+        build_context(context['job'], serialized_job, self.JOB_FIELDS_ALLOWED_LIST)
 
         return context
 
@@ -427,39 +429,40 @@ class JobNotificationMixin(object):
         raise RuntimeError("Define me")
 
     def build_notification_message(self, nt, status):
-        env = sandbox.ImmutableSandboxedEnvironment()
+        env = sandbox.ImmutableSandboxedEnvironment(undefined=ChainableUndefined)
 
         from awx.api.serializers import UnifiedJobSerializer
         job_serialization = UnifiedJobSerializer(self).to_representation(self)
         context = self.context(job_serialization)
 
         msg_template = body_template = None
+        msg = body = ''
 
+        # Use custom template if available
         if nt.messages:
-            templates = nt.messages.get(self.STATUS_TO_TEMPLATE_TYPE[status], {}) or {}
-            msg_template = templates.get('message', {})
-            body_template = templates.get('body', {})
+            template = nt.messages.get(self.STATUS_TO_TEMPLATE_TYPE[status], {}) or {}
+            msg_template = template.get('message', None)
+            body_template = template.get('body', None)
+        # If custom template not provided, look up default template
+        default_template = nt.notification_class.default_messages[self.STATUS_TO_TEMPLATE_TYPE[status]]
+        if not msg_template:
+            msg_template = default_template.get('message', None)
+        if not body_template:
+            body_template = default_template.get('body', None)
 
         if msg_template:
             try:
-                notification_subject = env.from_string(msg_template).render(**context)
+                msg = env.from_string(msg_template).render(**context)
             except (TemplateSyntaxError, UndefinedError, SecurityError):
-                notification_subject = ''
-        else:
-            notification_subject = u"{} #{} '{}' {}: {}".format(self.get_notification_friendly_name(),
-                                                                self.id,
-                                                                self.name,
-                                                                status,
-                                                                self.get_ui_url())
-        notification_body = self.notification_data()
-        notification_body['friendly_name'] = self.get_notification_friendly_name()
+                msg = ''
+
         if body_template:
             try:
-                notification_body['body'] = env.from_string(body_template).render(**context)
+                body = env.from_string(body_template).render(**context)
             except (TemplateSyntaxError, UndefinedError, SecurityError):
-                notification_body['body'] = ''
+                body = ''
 
-        return (notification_subject, notification_body)
+        return (msg, body)
 
     def send_notification_templates(self, status):
         from awx.main.tasks import send_notifications  # avoid circular import
@@ -475,16 +478,13 @@ class JobNotificationMixin(object):
             return
 
         for nt in set(notification_templates.get(self.STATUS_TO_TEMPLATE_TYPE[status], [])):
-            try:
-                (notification_subject, notification_body) = self.build_notification_message(nt, status)
-            except AttributeError:
-                raise NotImplementedError("build_notification_message() does not exist" % status)
+            (msg, body) = self.build_notification_message(nt, status)
 
             # Use kwargs to force late-binding
             # https://stackoverflow.com/a/3431699/10669572
-            def send_it(local_nt=nt, local_subject=notification_subject, local_body=notification_body):
+            def send_it(local_nt=nt, local_msg=msg, local_body=body):
                 def _func():
-                    send_notifications.delay([local_nt.generate_notification(local_subject, local_body).id],
+                    send_notifications.delay([local_nt.generate_notification(local_msg, local_body).id],
                                              job_id=self.id)
                 return _func
             connection.on_commit(send_it())

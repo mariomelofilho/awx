@@ -1,170 +1,131 @@
-import React, { Component } from 'react';
-import { Route, withRouter, Switch, Redirect, Link } from 'react-router-dom';
+import React, { useEffect, useCallback } from 'react';
+import {
+  Route,
+  withRouter,
+  Switch,
+  Redirect,
+  Link,
+  useParams,
+  useRouteMatch,
+} from 'react-router-dom';
 import { withI18n } from '@lingui/react';
 import { t } from '@lingui/macro';
-import styled from 'styled-components';
-import {
-  Card,
-  CardHeader as PFCardHeader,
-  PageSection,
-} from '@patternfly/react-core';
-import { JobsAPI } from '@api';
-import ContentError from '@components/ContentError';
-import CardCloseButton from '@components/CardCloseButton';
-import RoutedTabs from '@components/RoutedTabs';
-
+import { CaretLeftIcon } from '@patternfly/react-icons';
+import { Card, PageSection } from '@patternfly/react-core';
+import { JobsAPI } from '../../api';
+import ContentError from '../../components/ContentError';
+import ContentLoading from '../../components/ContentLoading';
+import RoutedTabs from '../../components/RoutedTabs';
+import useRequest from '../../util/useRequest';
 import JobDetail from './JobDetail';
 import JobOutput from './JobOutput';
-import { JOB_TYPE_URL_SEGMENTS } from '../../constants';
+import { WorkflowOutput } from './WorkflowOutput';
+import useWsJob from './useWsJob';
 
-class Job extends Component {
-  constructor(props) {
-    super(props);
+function Job({ i18n, setBreadcrumb }) {
+  const { id, type } = useParams();
+  const match = useRouteMatch();
 
-    this.state = {
-      job: null,
-      contentError: null,
-      hasContentLoading: true,
-      isInitialized: false,
-    };
+  const { isLoading, error, request: fetchJob, result } = useRequest(
+    useCallback(async () => {
+      const { data } = await JobsAPI.readDetail(id, type);
+      if (
+        data?.summary_fields?.credentials?.find(cred => cred.kind === 'vault')
+      ) {
+        const {
+          data: { results },
+        } = await JobsAPI.readCredentials(data.id, type);
 
-    this.loadJob = this.loadJob.bind(this);
-  }
-
-  async componentDidMount() {
-    await this.loadJob();
-    this.setState({ isInitialized: true });
-  }
-
-  async componentDidUpdate(prevProps) {
-    const { location } = this.props;
-    if (location !== prevProps.location) {
-      await this.loadJob();
-    }
-  }
-
-  async loadJob() {
-    const { match, setBreadcrumb } = this.props;
-    const id = parseInt(match.params.id, 10);
-
-    this.setState({ contentError: null, hasContentLoading: true });
-    try {
-      const { data } = await JobsAPI.readDetail(id, match.params.type);
+        data.summary_fields.credentials = results;
+      }
       setBreadcrumb(data);
-      this.setState({ job: data });
-    } catch (err) {
-      this.setState({ contentError: err });
-    } finally {
-      this.setState({ hasContentLoading: false });
-    }
-  }
+      return data;
+    }, [id, type, setBreadcrumb])
+  );
 
-  render() {
-    const { history, match, i18n, lookup } = this.props;
+  useEffect(() => {
+    fetchJob();
+  }, [fetchJob]);
 
-    const { job, contentError, hasContentLoading, isInitialized } = this.state;
-    let jobType;
-    if (job) {
-      jobType = JOB_TYPE_URL_SEGMENTS[job.type];
-    }
+  const job = useWsJob(result);
 
-    const tabsArray = [
-      { name: i18n._(t`Details`), link: `${match.url}/details`, id: 0 },
-      { name: i18n._(t`Output`), link: `${match.url}/output`, id: 1 },
-    ];
+  const tabsArray = [
+    {
+      name: (
+        <>
+          <CaretLeftIcon />
+          {i18n._(t`Back to Jobs`)}
+        </>
+      ),
+      link: `/jobs`,
+      id: 99,
+    },
+    { name: i18n._(t`Details`), link: `${match.url}/details`, id: 0 },
+    { name: i18n._(t`Output`), link: `${match.url}/output`, id: 1 },
+  ];
 
-    const CardHeader = styled(PFCardHeader)`
-      --pf-c-card--first-child--PaddingTop: 0;
-      --pf-c-card--child--PaddingLeft: 0;
-      --pf-c-card--child--PaddingRight: 0;
-      position: relative;
-    `;
-
-    let cardHeader = (
-      <CardHeader>
-        <RoutedTabs match={match} history={history} tabsArray={tabsArray} />
-        <CardCloseButton linkTo="/jobs" />
-      </CardHeader>
-    );
-
-    if (!isInitialized) {
-      cardHeader = null;
-    }
-
-    if (!match) {
-      cardHeader = null;
-    }
-
-    if (!hasContentLoading && contentError) {
-      return (
-        <PageSection>
-          <Card className="awx-c-card">
-            <ContentError error={contentError}>
-              {contentError.response.status === 404 && (
-                <span>
-                  {i18n._(`The page you requested could not be found.`)}{' '}
-                  <Link to="/jobs">{i18n._(`View all Jobs.`)}</Link>
-                </span>
-              )}
-            </ContentError>
-          </Card>
-        </PageSection>
-      );
-    }
-
-    if (lookup && job) {
-      return (
-        <Switch>
-          <Redirect from="jobs/:id" to={`/jobs/${jobType}/:id/details`} />
-          <Redirect
-            from="jobs/:id/details"
-            to={`/jobs/${jobType}/:id/details`}
-          />
-          <Redirect from="jobs/:id/output" to={`/jobs/${jobType}/:id/output`} />
-        </Switch>
-      );
-    }
-
+  if (isLoading) {
     return (
       <PageSection>
         <Card>
-          {cardHeader}
-          <Switch>
-            <Redirect
-              from="/jobs/:type/:id"
-              to="/jobs/:type/:id/details"
-              exact
-            />
-            {job && [
-              <Route
-                key="details"
-                path="/jobs/:type/:id/details"
-                render={() => <JobDetail type={match.params.type} job={job} />}
-              />,
-              <Route
-                key="output"
-                path="/jobs/:type/:id/output"
-                render={() => <JobOutput type={match.params.type} job={job} />}
-              />,
-              <Route
-                key="not-found"
-                path="*"
-                render={() => (
-                  <ContentError isNotFound>
-                    <Link
-                      to={`/jobs/${match.params.type}/${match.params.id}/details`}
-                    >
-                      {i18n._(`View Job Details`)}
-                    </Link>
-                  </ContentError>
-                )}
-              />,
-            ]}
-          </Switch>
+          <ContentLoading />
         </Card>
       </PageSection>
     );
   }
+
+  if (error) {
+    return (
+      <PageSection>
+        <Card>
+          <ContentError error={error}>
+            {error.response.status === 404 && (
+              <span>
+                {i18n._(t`The page you requested could not be found.`)}{' '}
+                <Link to="/jobs">{i18n._(t`View all Jobs.`)}</Link>
+              </span>
+            )}
+          </ContentError>
+        </Card>
+      </PageSection>
+    );
+  }
+
+  return (
+    <PageSection>
+      <Card>
+        <RoutedTabs tabsArray={tabsArray} />
+        <Switch>
+          <Redirect from="/jobs/:type/:id" to="/jobs/:type/:id/output" exact />
+          {job &&
+            job.type === 'workflow_job' && [
+              <Route key="workflow-details" path="/jobs/workflow/:id/details">
+                <JobDetail type={match.params.type} job={job} />
+              </Route>,
+              <Route key="workflow-output" path="/jobs/workflow/:id/output">
+                <WorkflowOutput job={job} />
+              </Route>,
+            ]}
+          {job &&
+            job.type !== 'workflow_job' && [
+              <Route key="details" path="/jobs/:type/:id/details">
+                <JobDetail type={type} job={job} />
+              </Route>,
+              <Route key="output" path="/jobs/:type/:id/output">
+                <JobOutput type={type} job={job} />
+              </Route>,
+              <Route key="not-found" path="*">
+                <ContentError isNotFound>
+                  <Link to={`/jobs/${type}/${id}/details`}>
+                    {i18n._(t`View Job Details`)}
+                  </Link>
+                </ContentError>
+              </Route>,
+            ]}
+        </Switch>
+      </Card>
+    </PageSection>
+  );
 }
 
 export default withI18n()(withRouter(Job));

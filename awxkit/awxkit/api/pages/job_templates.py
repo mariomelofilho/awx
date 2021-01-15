@@ -24,6 +24,7 @@ class JobTemplate(
         UnifiedJobTemplate):
 
     optional_dependencies = [Inventory, Credential, Project]
+    NATURAL_KEY = ('organization', 'name')
 
     def launch(self, payload={}):
         """Launch the job_template using related->launch endpoint."""
@@ -86,6 +87,8 @@ class JobTemplate(
             'vault_credential',
             'verbosity',
             'job_slice_count',
+            'webhook_service',
+            'webhook_credential',
             'scm_branch')
 
         update_payload(payload, optional_fields, kwargs)
@@ -102,6 +105,15 @@ class JobTemplate(
             payload.update(inventory=kwargs.get('inventory').id)
         if kwargs.get('credential'):
             payload.update(credential=kwargs.get('credential').id)
+        if kwargs.get('webhook_credential'):
+            webhook_cred = kwargs.get('webhook_credential')
+            if isinstance(webhook_cred, int):
+                payload.update(webhook_credential=int(webhook_cred))
+            elif hasattr(webhook_cred, 'id'):
+                payload.update(webhook_credential=webhook_cred.id)
+            else:
+                raise AttributeError("Webhook credential must either be integer of pkid or Credential object")
+
         return payload
 
     def add_label(self, label):
@@ -120,7 +132,7 @@ class JobTemplate(
             inventory=Inventory,
             project=None,
             **kwargs):
-        if not project and job_type != 'scan':
+        if not project:
             project = Project
         if not inventory and not kwargs.get('ask_inventory_on_launch', False):
             inventory = Inventory
@@ -178,16 +190,6 @@ class JobTemplate(
                     dict(id=kwargs['vault_credential']))
         return ret
 
-    def add_extra_credential(self, credential):
-        with suppress(exc.NoContent):
-            self.related.extra_credentials.post(
-                dict(id=credential.id, associate=True))
-
-    def remove_extra_credential(self, credential):
-        with suppress(exc.NoContent):
-            self.related.extra_credentials.post(
-                dict(id=credential.id, disassociate=True))
-
     def add_credential(self, credential):
         with suppress(exc.NoContent):
             self.related.credentials.post(
@@ -233,3 +235,11 @@ class JobTemplateLaunch(base.Base):
 
 
 page.register_page(resources.job_template_launch, JobTemplateLaunch)
+
+
+class JobTemplateCopy(base.Base):
+
+    pass
+
+
+page.register_page([resources.job_template_copy], JobTemplateCopy)

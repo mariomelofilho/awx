@@ -11,6 +11,7 @@ from . import page
 class Team(HasCreate, base.Base):
 
     dependencies = [Organization]
+    NATURAL_KEY = ('organization', 'name')
 
     def add_user(self, user):
         if isinstance(user, page.Page):
@@ -45,4 +46,5 @@ class Teams(page.PageList, Team):
 
 
 page.register_page([resources.teams,
+                    resources.credential_owner_teams,
                     resources.related_teams], Teams)

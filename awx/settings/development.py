@@ -21,7 +21,6 @@ from split_settings.tools import optional, include
 # Load default settings.
 from .defaults import *  # NOQA
 
-# don't use memcache when running tests
 if "pytest" in sys.modules:
     CACHES = {
         'default': {
@@ -51,6 +50,9 @@ COLOR_LOGS = True
 
 # Pipe management playbook output to console
 LOGGING['loggers']['awx.isolated.manager.playbooks']['propagate'] = True  # noqa
+
+# celery is annoyingly loud when docker containers start
+LOGGING['loggers'].pop('celery', None)  # noqa
 
 ALLOWED_HOSTS = ['*']
 
@@ -84,7 +86,6 @@ AWX_PROOT_ENABLED = True
 AWX_ISOLATED_USERNAME = 'root'
 AWX_ISOLATED_CHECK_INTERVAL = 1
 AWX_ISOLATED_PERIODIC_CHECK = 30
-AWX_ISOLATED_LAUNCH_TIMEOUT = 30
 
 # Disable Pendo on the UI for development/test.
 # Note: This setting may be overridden by database settings.
@@ -146,7 +147,10 @@ for setting in dir(this_module):
 include(optional('/etc/tower/settings.py'), scope=locals())
 include(optional('/etc/tower/conf.d/*.py'), scope=locals())
 
-BASE_VENV_PATH = "/venv/"
+# Installed differently in Dockerfile compared to production versions
+AWX_ANSIBLE_COLLECTIONS_PATHS = '/var/lib/awx/vendor/awx_ansible_collections'
+
+BASE_VENV_PATH = "/var/lib/awx/venv/"
 ANSIBLE_VENV_PATH = os.path.join(BASE_VENV_PATH, "ansible")
 AWX_VENV_PATH = os.path.join(BASE_VENV_PATH, "awx")
 
@@ -174,6 +178,12 @@ CLUSTER_HOST_ID = socket.gethostname()
 if 'Docker Desktop' in os.getenv('OS', ''):
     os.environ['SDB_NOTIFY_HOST'] = 'docker.for.mac.host.internal'
 else:
-    os.environ['SDB_NOTIFY_HOST'] = os.popen('ip route').read().split(' ')[2]
+    try:
+        os.environ['SDB_NOTIFY_HOST'] = os.popen('ip route').read().split(' ')[2]
+    except Exception:
+        pass
 
-WEBSOCKET_ORIGIN_WHITELIST = ['https://localhost:8043', 'https://localhost:3000']
+AWX_CALLBACK_PROFILE = True
+
+if 'sqlite3' not in DATABASES['default']['ENGINE']: # noqa
+    DATABASES['default'].setdefault('OPTIONS', dict()).setdefault('application_name', f'{CLUSTER_HOST_ID}-{os.getpid()}-{" ".join(sys.argv)}'[:63]) # noqa

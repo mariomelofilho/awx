@@ -15,12 +15,11 @@ class ConnectionException(exc.Common):
 
 
 class Token_Auth(requests.auth.AuthBase):
-    def __init__(self, token, auth_type='Token'):
+    def __init__(self, token):
         self.token = token
-        self.auth_type = auth_type
 
     def __call__(self, request):
-        request.headers['Authorization'] = '{0.auth_type} {0.token}'.format(self)
+        request.headers['Authorization'] = 'Bearer {0.token}'.format(self)
         return request
 
 
@@ -57,7 +56,7 @@ class Connection(object):
             else:
                 self.session.auth = (username, password)
         elif token:
-            self.session.auth = Token_Auth(token, auth_type=kwargs.get('auth_type', 'Token'))
+            self.session.auth = Token_Auth(token)
         else:
             self.session.auth = None
 
@@ -74,9 +73,11 @@ class Connection(object):
             raise ConnectionException(message="Unknown request method: {0}".format(method))
 
         use_endpoint = relative_endpoint
-        if self.server.endswith('/') and use_endpoint.startswith('/'):
-            raise RuntimeError('AWX URL given with trailing slash, remove slash.')
-        url = '{0.server}{1}'.format(self, use_endpoint)
+        if self.server.endswith('/'):
+            self.server = self.server[:-1]
+        if use_endpoint.startswith('/'):
+            use_endpoint = use_endpoint[1:]
+        url = '/'.join([self.server, use_endpoint])
 
         kwargs = dict(verify=self.verify, params=query_parameters, json=json, data=data,
                       hooks=dict(response=log_elapsed))

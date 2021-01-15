@@ -11,7 +11,10 @@ describe('<_AddResourceRole />', () => {
   UsersAPI.read.mockResolvedValue({
     data: {
       count: 2,
-      results: [{ id: 1, username: 'foo' }, { id: 2, username: 'bar' }],
+      results: [
+        { id: 1, username: 'foo' },
+        { id: 2, username: 'bar' },
+      ],
     },
   });
   const roles = {
@@ -152,6 +155,7 @@ describe('<_AddResourceRole />', () => {
       selectedResourceRows: [],
       selectedRoleRows: [],
       currentStepId: 1,
+      maxEnabledStep: 1,
     });
     wrapper.instance().handleResourceSelect('teams');
     expect(wrapper.state()).toEqual({
@@ -159,6 +163,7 @@ describe('<_AddResourceRole />', () => {
       selectedResourceRows: [],
       selectedRoleRows: [],
       currentStepId: 1,
+      maxEnabledStep: 1,
     });
   });
   test('handleWizardSave makes correct api calls, calls onSave when done', async () => {
@@ -215,5 +220,23 @@ describe('<_AddResourceRole />', () => {
     await wrapper.instance().handleWizardSave();
     expect(TeamsAPI.associateRole).toHaveBeenCalledTimes(2);
     expect(handleSave).toHaveBeenCalled();
+  });
+
+  test('should not display team as a choice in case credential does not have organization', () => {
+    const spy = jest.spyOn(_AddResourceRole.prototype, 'handleResourceSelect');
+    const wrapper = mountWithContexts(
+      <AddResourceRole
+        onClose={() => {}}
+        onSave={() => {}}
+        roles={roles}
+        resource={{ type: 'credential', organization: null }}
+      />,
+      { context: { network: { handleHttpError: () => {} } } }
+    ).find('AddResourceRole');
+    const selectableCardWrapper = wrapper.find('SelectableCard');
+    expect(selectableCardWrapper.length).toBe(1);
+    selectableCardWrapper.first().simulate('click');
+    expect(spy).toHaveBeenCalledWith('users');
+    expect(wrapper.state('selectedResource')).toBe('users');
   });
 });

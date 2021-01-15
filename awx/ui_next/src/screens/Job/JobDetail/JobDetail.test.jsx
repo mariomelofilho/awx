@@ -1,60 +1,148 @@
 import React from 'react';
-import { mountWithContexts } from '@testUtils/enzymeHelpers';
+import { act } from 'react-dom/test-utils';
+import { mountWithContexts } from '../../../../testUtils/enzymeHelpers';
+import { sleep } from '../../../../testUtils/testUtils';
 import JobDetail from './JobDetail';
+import { JobsAPI, ProjectUpdatesAPI } from '../../../api';
+import mockJobData from '../shared/data.job.json';
+
+jest.mock('../../../api');
 
 describe('<JobDetail />', () => {
-  let job;
-
-  beforeEach(() => {
-    job = {
-      name: 'Foo',
-      summary_fields: {},
-    };
-  });
-
-  test('initially renders succesfully', () => {
-    mountWithContexts(<JobDetail job={job} />);
-  });
-
-  test('should display a Close button', () => {
-    const wrapper = mountWithContexts(<JobDetail job={job} />);
-
-    expect(wrapper.find('Button[aria-label="close"]').length).toBe(1);
+  let wrapper;
+  afterEach(() => {
     wrapper.unmount();
   });
 
   test('should display details', () => {
-    job.status = 'Successful';
-    job.started = '2019-07-02T17:35:22.753817Z';
-    job.finished = '2019-07-02T17:35:34.910800Z';
-
-    const wrapper = mountWithContexts(<JobDetail job={job} />);
-    const details = wrapper.find('Detail');
-
-    function assertDetail(detail, label, value) {
-      expect(detail.prop('label')).toEqual(label);
-      expect(detail.prop('value')).toEqual(value);
+    function assertDetail(label, value) {
+      expect(wrapper.find(`Detail[label="${label}"] dt`).text()).toBe(label);
+      expect(wrapper.find(`Detail[label="${label}"] dd`).text()).toBe(value);
     }
 
-    assertDetail(details.at(0), 'Status', 'Successful');
-    assertDetail(details.at(1), 'Started', job.started);
-    assertDetail(details.at(2), 'Finished', job.finished);
+    wrapper = mountWithContexts(
+      <JobDetail
+        job={{
+          ...mockJobData,
+          summary_fields: {
+            ...mockJobData.summary_fields,
+            credential: {
+              id: 2,
+              name: 'Machine cred',
+              description: '',
+              kind: 'ssh',
+              cloud: false,
+              kubernetes: false,
+              credential_type_id: 1,
+            },
+          },
+        }}
+      />
+    );
+
+    // StatusIcon adds visibly hidden accessibility text " successful "
+    assertDetail('Status', ' successful Successful');
+    assertDetail('Started', '8/8/2019, 7:24:18 PM');
+    assertDetail('Finished', '8/8/2019, 7:24:50 PM');
+    assertDetail('Job Template', mockJobData.summary_fields.job_template.name);
+    assertDetail('Job Type', 'Playbook Run');
+    assertDetail('Launched By', mockJobData.summary_fields.created_by.username);
+    assertDetail('Inventory', mockJobData.summary_fields.inventory.name);
+    assertDetail(
+      'Project',
+      ` successful ${mockJobData.summary_fields.project.name}`
+    );
+    assertDetail('Revision', mockJobData.scm_revision);
+    assertDetail('Playbook', mockJobData.playbook);
+    assertDetail('Verbosity', '0 (Normal)');
+    assertDetail('Environment', mockJobData.custom_virtualenv);
+    assertDetail('Execution Node', mockJobData.execution_node);
+    assertDetail(
+      'Instance Group',
+      mockJobData.summary_fields.instance_group.name
+    );
+    assertDetail('Job Slice', '0/1');
+    assertDetail('Credentials', 'SSH: Demo Credential');
+    assertDetail('Machine Credential', 'SSH: Machine cred');
+
+    const credentialChip = wrapper.find(
+      `Detail[label="Credentials"] CredentialChip`
+    );
+    expect(credentialChip.prop('credential')).toEqual(
+      mockJobData.summary_fields.credentials[0]
+    );
+
+    const statusDetail = wrapper.find('Detail[label="Status"]');
+    expect(statusDetail.find('StatusIcon SuccessfulTop')).toHaveLength(1);
+    expect(statusDetail.find('StatusIcon SuccessfulBottom')).toHaveLength(1);
+
+    const projectStatusDetail = wrapper.find('Detail[label="Project"]');
+    expect(projectStatusDetail.find('StatusIcon SuccessfulTop')).toHaveLength(
+      1
+    );
+    expect(
+      projectStatusDetail.find('StatusIcon SuccessfulBottom')
+    ).toHaveLength(1);
   });
 
-  test('should display credentials', () => {
-    job.summary_fields.credentials = [
-      {
-        id: 1,
-        name: 'Foo',
-        cloud: false,
-        kind: 'ssh',
-      },
-    ];
-    const wrapper = mountWithContexts(<JobDetail job={job} />);
-    const credentialChip = wrapper.find('CredentialChip');
+  test('should properly delete job', async () => {
+    wrapper = mountWithContexts(<JobDetail job={mockJobData} />);
+    wrapper.find('button[aria-label="Delete"]').simulate('click');
+    await sleep(1);
+    wrapper.update();
+    const modal = wrapper.find('Modal');
+    expect(modal.length).toBe(1);
+    modal.find('button[aria-label="Delete"]').simulate('click');
+    expect(JobsAPI.destroy).toHaveBeenCalledTimes(1);
+  });
 
-    expect(credentialChip.prop('credential')).toEqual(
-      job.summary_fields.credentials[0]
+  test('should display error modal when a job does not delete properly', async () => {
+    ProjectUpdatesAPI.destroy.mockRejectedValue(
+      new Error({
+        response: {
+          config: {
+            method: 'delete',
+            url: '/api/v2/project_updates/1',
+          },
+          data: 'An error occurred',
+          status: 404,
+        },
+      })
     );
+    wrapper = mountWithContexts(<JobDetail job={mockJobData} />);
+    wrapper.find('button[aria-label="Delete"]').simulate('click');
+    const modal = wrapper.find('Modal');
+    expect(modal.length).toBe(1);
+    await act(async () => {
+      modal.find('button[aria-label="Delete"]').simulate('click');
+    });
+    wrapper.update();
+
+    const errorModal = wrapper.find('ErrorDetail');
+    expect(errorModal.length).toBe(1);
+  });
+
+  test('DELETED is shown for required Job resources that have been deleted', () => {
+    wrapper = mountWithContexts(
+      <JobDetail
+        job={{
+          ...mockJobData,
+          summary_fields: {
+            ...mockJobData.summary_fields,
+            inventory: null,
+            project: null,
+          },
+        }}
+      />
+    );
+    const detail = wrapper.find('JobDetail');
+    async function assertMissingDetail(label) {
+      expect(detail.length).toBe(1);
+      await sleep(0);
+      expect(detail.find(`Detail[label="${label}"] dt`).text()).toBe(label);
+      expect(detail.find(`Detail[label="${label}"] dd`).text()).toBe('DELETED');
+    }
+    assertMissingDetail('Project');
+    assertMissingDetail('Inventory');
   });
 });

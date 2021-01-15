@@ -14,6 +14,7 @@ class Project(HasCopy, HasCreate, HasNotifications, UnifiedJobTemplate):
 
     optional_dependencies = [Credential, Organization]
     optional_schedule_fields = tuple()
+    NATURAL_KEY = ('organization', 'name')
 
     def payload(self, organization, scm_type='git', **kwargs):
         payload = PseudoNamespace(
@@ -112,7 +113,8 @@ class Project(HasCopy, HasCreate, HasNotifications, UnifiedJobTemplate):
         self.update_identity(Projects(self.connection).post(payload))
 
         if kwargs.get('wait', True):
-            self.related.current_update.get().wait_until_completed()
+            update = self.related.current_update.get()
+            update.wait_until_completed().assert_successful()
             return self.get()
 
         return self
@@ -199,6 +201,14 @@ class ProjectUpdateCancel(base.Base):
 
 
 page.register_page(resources.project_update_cancel, ProjectUpdateCancel)
+
+
+class ProjectCopy(base.Base):
+
+    pass
+
+
+page.register_page(resources.project_copy, ProjectCopy)
 
 
 class Playbooks(base.Base):

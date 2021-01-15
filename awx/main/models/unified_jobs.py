@@ -3,6 +3,7 @@
 
 # Python
 from io import StringIO
+import datetime
 import codecs
 import json
 import logging
@@ -35,6 +36,7 @@ from awx.main.models.base import (
     NotificationFieldsModel,
     prevent_search
 )
+from awx.main.dispatch import get_local_queuename
 from awx.main.dispatch.control import Control as ControlDispatcher
 from awx.main.registrar import activity_stream_registrar
 from awx.main.models.mixins import ResourceMixin, TaskManagerUnifiedJobMixin
@@ -42,9 +44,9 @@ from awx.main.utils import (
     camelcase_to_underscore, get_model_for_type,
     encrypt_dict, decrypt_field, _inventory_updates,
     copy_model_by_class, copy_m2m_relationships,
-    get_type_for_model, parse_yaml_or_json, getattr_dne
+    get_type_for_model, parse_yaml_or_json, getattr_dne,
+    polymorphic, schedule_task_manager
 )
-from awx.main.utils import polymorphic, schedule_task_manager
 from awx.main.constants import ACTIVE_STATES, CAN_CANCEL
 from awx.main.redact import UriCleaner, REPLACE_STR
 from awx.main.consumers import emit_channel_notification
@@ -101,7 +103,7 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
         ordering = ('name',)
         # unique_together here is intentionally commented out. Please make sure sub-classes of this model
         # contain at least this uniqueness restriction: SOFT_UNIQUE_TOGETHER = [('polymorphic_ctype', 'name')]
-        #unique_together = [('polymorphic_ctype', 'name')]
+        #unique_together = [('polymorphic_ctype', 'name', 'organization')]
 
     old_pk = models.PositiveIntegerField(
         null=True,
@@ -148,13 +150,21 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
         default=None,
         editable=False,
         related_name='%(class)s_as_next_schedule+',
-        on_delete=models.SET_NULL,
+        on_delete=polymorphic.SET_NULL,
     )
     status = models.CharField(
         max_length=32,
         choices=ALL_STATUS_CHOICES,
         default='ok',
         editable=False,
+    )
+    organization = models.ForeignKey(
+        'Organization',
+        blank=True,
+        null=True,
+        on_delete=polymorphic.SET_NULL,
+        related_name='%(class)ss',
+        help_text=_('The organization used to determine access to this template.'),
     )
     credentials = models.ManyToManyField(
         'Credential',
@@ -403,9 +413,8 @@ class UnifiedJobTemplate(PolymorphicModel, CommonModelNameNotUnique, Notificatio
         if 'extra_vars' in validated_kwargs:
             unified_job.handle_extra_data(validated_kwargs['extra_vars'])
 
-        if not getattr(self, '_deprecated_credential_launch', False):
-            # Create record of provided prompts for relaunch and rescheduling
-            unified_job.create_config_from_prompts(kwargs, parent=self)
+        # Create record of provided prompts for relaunch and rescheduling
+        unified_job.create_config_from_prompts(kwargs, parent=self)
 
         # manually issue the create activity stream entry _after_ M2M relations
         # have been associated to the UJ
@@ -532,6 +541,7 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         ('scheduled', _('Scheduled')),      # Job was started from a schedule.
         ('dependency', _('Dependency')),    # Job was started as a dependency of another job.
         ('workflow', _('Workflow')),        # Job was started from a workflow job.
+        ('webhook', _('Webhook')),          # Job was started from a webhook event.
         ('sync', _('Sync')),                # Job was started from a project sync.
         ('scm', _('SCM Update'))            # Job was created as an Inventory SCM sync.
     ]
@@ -559,18 +569,24 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         related_name='%(class)s_unified_jobs',
         on_delete=polymorphic.SET_NULL,
     )
+    created = models.DateTimeField(
+        default=None,
+        editable=False,
+        db_index=True,  # add an index, this is a commonly queried field
+    )
     launch_type = models.CharField(
         max_length=20,
         choices=LAUNCH_TYPE_CHOICES,
         default='manual',
         editable=False,
+        db_index=True
     )
     schedule = models.ForeignKey( # Which schedule entry was responsible for starting this job.
         'Schedule',
         null=True,
         default=None,
         editable=False,
-        on_delete=models.SET_NULL,
+        on_delete=polymorphic.SET_NULL,
     )
     dependent_jobs = models.ManyToManyField(
         'self',
@@ -616,11 +632,24 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         editable=False,
         help_text=_("The date and time the job was queued for starting."),
     )
+    dependencies_processed = models.BooleanField(
+        default=False,
+        editable=False,
+        help_text=_("If True, the task manager has already processed potential dependencies for this job.")
+    )
     finished = models.DateTimeField(
         null=True,
         default=None,
         editable=False,
         help_text=_("The date and time the job finished execution."),
+        db_index=True,
+    )
+    canceled_on = models.DateTimeField(
+        null=True,
+        default=None,
+        editable=False,
+        help_text=_("The date and time when the cancel request was sent."),
+        db_index=True,
     )
     elapsed = models.DecimalField(
         max_digits=12,
@@ -677,7 +706,15 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         null=True,
         default=None,
         on_delete=polymorphic.SET_NULL,
-        help_text=_('The Rampart/Instance group the job was run under'),
+        help_text=_('The Instance group the job was run under'),
+    )
+    organization = models.ForeignKey(
+        'Organization',
+        blank=True,
+        null=True,
+        on_delete=polymorphic.SET_NULL,
+        related_name='%(class)ss',
+        help_text=_('The organization used to determine access to this unified job.'),
     )
     credentials = models.ManyToManyField(
         'Credential',
@@ -704,6 +741,10 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
 
     @classmethod
     def supports_isolation(cls):
+        return False
+
+    @property
+    def can_run_containerized(self):
         return False
 
     def _get_parent_field_name(self):
@@ -821,13 +862,24 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
             self.unified_job_template = self._get_parent_instance()
             if 'unified_job_template' not in update_fields:
                 update_fields.append('unified_job_template')
-
+        
+        if self.cancel_flag and not self.canceled_on:
+            # Record the 'canceled' time.
+            self.canceled_on = now()
+            if 'canceled_on' not in update_fields:
+                update_fields.append('canceled_on')
         # Okay; we're done. Perform the actual save.
         result = super(UnifiedJob, self).save(*args, **kwargs)
 
         # If status changed, update the parent instance.
         if self.status != status_before:
-            self._update_parent_instance()
+            # Update parent outside of the transaction for Job w/ allow_simultaneous=True
+            # This dodges lock contention at the expense of the foreign key not being
+            # completely correct.
+            if getattr(self, 'allow_simultaneous', False):
+                connection.on_commit(self._update_parent_instance)
+            else:
+                self._update_parent_instance()
 
         # Done.
         return result
@@ -917,6 +969,10 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         raise NotImplementedError()
 
     @property
+    def job_type_name(self):
+        return self.get_real_instance_class()._meta.verbose_name.replace(' ', '_')
+
+    @property
     def result_stdout_text(self):
         related = UnifiedJobDeprecatedStdout.objects.get(pk=self.pk)
         return related.result_stdout_text or ''
@@ -985,6 +1041,8 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
                 dir=settings.JOBOUTPUT_ROOT,
                 encoding='utf-8'
             )
+            from awx.main.tasks import purge_old_stdout_files  # circular import
+            purge_old_stdout_files.apply_async()
 
         # Before the addition of event-based stdout, older versions of
         # awx stored stdout as raw text blobs in a certain database column
@@ -1173,7 +1231,7 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
 
     def websocket_emit_data(self):
         ''' Return extra data that should be included when submitting data to the browser over the websocket connection '''
-        websocket_data = dict(type=self.get_real_instance_class()._meta.verbose_name.replace(' ', '_'))
+        websocket_data = dict(type=self.job_type_name)
         if self.spawned_by_workflow:
             websocket_data.update(dict(workflow_job_id=self.workflow_job_id,
                                        workflow_node_id=self.workflow_node_id))
@@ -1187,18 +1245,25 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
                     status_data['instance_group_name'] = self.instance_group.name
                 else:
                     status_data['instance_group_name'] = None
+            elif status in ['successful', 'failed', 'canceled'] and self.finished:
+                status_data['finished'] = datetime.datetime.strftime(self.finished, "%Y-%m-%dT%H:%M:%S.%fZ")
             status_data.update(self.websocket_emit_data())
             status_data['group_name'] = 'jobs'
+            if getattr(self, 'unified_job_template_id', None):
+                status_data['unified_job_template_id'] = self.unified_job_template_id
             emit_channel_notification('jobs-status_changed', status_data)
 
             if self.spawned_by_workflow:
                 status_data['group_name'] = "workflow_events"
+                status_data['workflow_job_template_id'] = self.unified_job_template.id
                 emit_channel_notification('workflow_events-' + str(self.workflow_job_id), status_data)
         except IOError:  # includes socket errors
             logger.exception('%s failed to emit channel msg about status change', self.log_format)
 
     def websocket_emit_status(self, status):
         connection.on_commit(lambda: self._websocket_emit_status(status))
+        if hasattr(self, 'update_webhook_status'):
+            connection.on_commit(lambda: self.update_webhook_status(status))
 
     def notification_data(self):
         return dict(id=self.id,
@@ -1305,9 +1370,9 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
             timeout = 5
             try:
                 running = self.celery_task_id in ControlDispatcher(
-                    'dispatcher', self.execution_node
+                    'dispatcher', self.controller_node or self.execution_node
                 ).running(timeout=timeout)
-            except socket.timeout:
+            except (socket.timeout, RuntimeError):
                 logger.error('could not reach dispatcher on {} within {}s'.format(
                     self.execution_node, timeout
                 ))
@@ -1379,9 +1444,13 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
 
         wj = self.get_workflow_job()
         if wj:
+            schedule = getattr_dne(wj, 'schedule')
             for name in ('awx', 'tower'):
                 r['{}_workflow_job_id'.format(name)] = wj.pk
                 r['{}_workflow_job_name'.format(name)] = wj.name
+                if schedule:
+                    r['{}_parent_job_schedule_id'.format(name)] = schedule.pk
+                    r['{}_parent_job_schedule_name'.format(name)] = schedule.name
 
         if not created_by:
             schedule = getattr_dne(self, 'schedule')
@@ -1407,7 +1476,11 @@ class UnifiedJob(PolymorphicModel, PasswordFieldsModel, CommonModelNameNotUnique
         return r
 
     def get_queue_name(self):
-        return self.controller_node or self.execution_node or settings.CELERY_DEFAULT_QUEUE
+        return self.controller_node or self.execution_node or get_local_queuename()
 
     def is_isolated(self):
         return bool(self.controller_node)
+
+    @property
+    def is_containerized(self):
+        return False

@@ -174,8 +174,15 @@ class TestSAMLAttr():
         return (o1, o2, o3)
 
     @pytest.fixture
-    def mock_settings(self):
+    def mock_settings(self, request):
+        fixture_args = request.node.get_closest_marker('fixture_args')
+        if fixture_args and 'autocreate' in fixture_args.kwargs:
+            autocreate = fixture_args.kwargs['autocreate']
+        else:
+            autocreate = True
+
         class MockSettings():
+            SAML_AUTO_CREATE_OBJECTS = autocreate
             SOCIAL_AUTH_SAML_ORGANIZATION_ATTR = {
                 'saml_attr': 'memberOf',
                 'saml_admin_attr': 'admins',
@@ -193,6 +200,10 @@ class TestSAMLAttr():
                     {'team': 'Red', 'organization': 'Default1'},
                     {'team': 'Green', 'organization': 'Default1'},
                     {'team': 'Green', 'organization': 'Default3'},
+                    {
+                        'team': 'Yellow', 'team_alias': 'Yellow_Alias',
+                        'organization': 'Default4', 'organization_alias': 'Default4_Alias'
+                    },
                 ]
             }
         return MockSettings()
@@ -285,3 +296,56 @@ class TestSAMLAttr():
             assert Team.objects.get(name='Green', organization__name='Default1').member_role.members.count() == 3
             assert Team.objects.get(name='Green', organization__name='Default3').member_role.members.count() == 3
 
+    def test_update_user_teams_alias_by_saml_attr(self, orgs, users, kwargs, mock_settings):
+        with mock.patch('django.conf.settings', mock_settings):
+            u1 = users[0]
+
+            # Test getting teams from attribute with team->org mapping
+            kwargs['response']['attributes']['groups'] = ['Yellow']
+
+            # Ensure team and org will be created
+            update_user_teams_by_saml_attr(None, None, u1, **kwargs)
+
+            assert Team.objects.filter(name='Yellow', organization__name='Default4').count() == 0
+            assert Team.objects.filter(name='Yellow_Alias', organization__name='Default4_Alias').count() == 1
+            assert Team.objects.get(
+                name='Yellow_Alias', organization__name='Default4_Alias').member_role.members.count() == 1
+
+    @pytest.mark.fixture_args(autocreate=False)
+    def test_autocreate_disabled(self, users, kwargs, mock_settings):
+        kwargs['response']['attributes']['memberOf'] = ['Default1', 'Default2', 'Default3']
+        kwargs['response']['attributes']['groups'] = ['Blue', 'Red', 'Green']
+        with mock.patch('django.conf.settings', mock_settings):
+            for u in users:
+                update_user_orgs_by_saml_attr(None, None, u, **kwargs)
+                update_user_teams_by_saml_attr(None, None, u, **kwargs)
+                assert Organization.objects.count() == 0
+                assert Team.objects.count() == 0
+
+            # precreate everything
+            o1 = Organization.objects.create(name='Default1')
+            o2 = Organization.objects.create(name='Default2')
+            o3 = Organization.objects.create(name='Default3')
+            Team.objects.create(name='Blue', organization_id=o1.id)
+            Team.objects.create(name='Blue', organization_id=o2.id)
+            Team.objects.create(name='Blue', organization_id=o3.id)
+            Team.objects.create(name='Red', organization_id=o1.id)
+            Team.objects.create(name='Green', organization_id=o1.id)
+            Team.objects.create(name='Green', organization_id=o3.id)
+
+            for u in users:
+                update_user_orgs_by_saml_attr(None, None, u, **kwargs)
+                update_user_teams_by_saml_attr(None, None, u, **kwargs)
+
+        assert o1.member_role.members.count() == 3
+        assert o2.member_role.members.count() == 3
+        assert o3.member_role.members.count() == 3
+
+        assert Team.objects.get(name='Blue', organization__name='Default1').member_role.members.count() == 3
+        assert Team.objects.get(name='Blue', organization__name='Default2').member_role.members.count() == 3
+        assert Team.objects.get(name='Blue', organization__name='Default3').member_role.members.count() == 3
+
+        assert Team.objects.get(name='Red', organization__name='Default1').member_role.members.count() == 3
+
+        assert Team.objects.get(name='Green', organization__name='Default1').member_role.members.count() == 3
+        assert Team.objects.get(name='Green', organization__name='Default3').member_role.members.count() == 3

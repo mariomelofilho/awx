@@ -1,295 +1,283 @@
-import React, { Component } from 'react';
-import { withRouter, Link } from 'react-router-dom';
+import React, { Fragment, useEffect, useState, useCallback } from 'react';
+import { useLocation, Link } from 'react-router-dom';
 import { withI18n } from '@lingui/react';
-
 import { t } from '@lingui/macro';
+import { Card, DropdownItem } from '@patternfly/react-core';
 import {
-  Card,
-  PageSection,
-  Dropdown,
-  DropdownItem,
-  DropdownPosition,
-} from '@patternfly/react-core';
-
-import { JobTemplatesAPI, WorkflowJobTemplatesAPI } from '@api';
-import AlertModal from '@components/AlertModal';
-import DatalistToolbar from '@components/DataListToolbar';
-import ErrorDetail from '@components/ErrorDetail';
+  JobTemplatesAPI,
+  UnifiedJobTemplatesAPI,
+  WorkflowJobTemplatesAPI,
+} from '../../../api';
+import AlertModal from '../../../components/AlertModal';
+import DatalistToolbar from '../../../components/DataListToolbar';
+import ErrorDetail from '../../../components/ErrorDetail';
 import PaginatedDataList, {
   ToolbarDeleteButton,
-  ToolbarAddButton,
-} from '@components/PaginatedDataList';
-import { getQSConfig, parseQueryString } from '@util/qs';
-
+} from '../../../components/PaginatedDataList';
+import useRequest, { useDeleteItems } from '../../../util/useRequest';
+import { getQSConfig, parseQueryString } from '../../../util/qs';
+import useWsTemplates from '../../../util/useWsTemplates';
+import AddDropDownButton from '../../../components/AddDropDownButton';
 import TemplateListItem from './TemplateListItem';
 
 // The type value in const QS_CONFIG below does not have a space between job_template and
 // workflow_job_template so the params sent to the API match what the api expects.
 const QS_CONFIG = getQSConfig('template', {
   page: 1,
-  page_size: 5,
+  page_size: 20,
   order_by: 'name',
   type: 'job_template,workflow_job_template',
 });
 
-class TemplatesList extends Component {
-  constructor(props) {
-    super(props);
+function TemplateList({ i18n }) {
+  const location = useLocation();
+  const [selected, setSelected] = useState([]);
 
-    this.state = {
-      hasContentLoading: true,
-      contentError: null,
-      deletionError: null,
-      selected: [],
-      templates: [],
-      itemCount: 0,
-      isAddOpen: false,
-    };
-
-    this.loadTemplates = this.loadTemplates.bind(this);
-    this.handleSelectAll = this.handleSelectAll.bind(this);
-    this.handleSelect = this.handleSelect.bind(this);
-    this.handleTemplateDelete = this.handleTemplateDelete.bind(this);
-    this.handleDeleteErrorClose = this.handleDeleteErrorClose.bind(this);
-    this.handleAddToggle = this.handleAddToggle.bind(this);
-  }
-
-  componentDidMount() {
-    this.loadTemplates();
-  }
-
-  componentDidUpdate(prevProps) {
-    const { location } = this.props;
-    if (location !== prevProps.location) {
-      this.loadTemplates();
+  const {
+    result: {
+      results,
+      count,
+      jtActions,
+      wfjtActions,
+      relatedSearchableKeys,
+      searchableKeys,
+    },
+    error: contentError,
+    isLoading,
+    request: fetchTemplates,
+  } = useRequest(
+    useCallback(async () => {
+      const params = parseQueryString(QS_CONFIG, location.search);
+      const responses = await Promise.all([
+        UnifiedJobTemplatesAPI.read(params),
+        JobTemplatesAPI.readOptions(),
+        WorkflowJobTemplatesAPI.readOptions(),
+        UnifiedJobTemplatesAPI.readOptions(),
+      ]);
+      return {
+        results: responses[0].data.results,
+        count: responses[0].data.count,
+        jtActions: responses[1].data.actions,
+        wfjtActions: responses[2].data.actions,
+        relatedSearchableKeys: (
+          responses[3]?.data?.related_search_fields || []
+        ).map(val => val.slice(0, -8)),
+        searchableKeys: Object.keys(
+          responses[3].data.actions?.GET || {}
+        ).filter(key => responses[3].data.actions?.GET[key].filterable),
+      };
+    }, [location]),
+    {
+      results: [],
+      count: 0,
+      jtActions: {},
+      wfjtActions: {},
+      relatedSearchableKeys: [],
+      searchableKeys: [],
     }
-  }
+  );
 
-  handleDeleteErrorClose() {
-    this.setState({ deletionError: null });
-  }
+  useEffect(() => {
+    fetchTemplates();
+  }, [fetchTemplates]);
 
-  handleSelectAll(isSelected) {
-    const { templates } = this.state;
-    const selected = isSelected ? [...templates] : [];
-    this.setState({ selected });
-  }
+  const templates = useWsTemplates(results);
 
-  handleSelect(template) {
-    const { selected } = this.state;
-    if (selected.some(s => s.id === template.id)) {
-      this.setState({ selected: selected.filter(s => s.id !== template.id) });
-    } else {
-      this.setState({ selected: selected.concat(template) });
-    }
-  }
-
-  handleAddToggle() {
-    const { isAddOpen } = this.state;
-    this.setState({ isAddOpen: !isAddOpen });
-  }
-
-  async handleTemplateDelete() {
-    const { selected, itemCount } = this.state;
-
-    this.setState({ hasContentLoading: true });
-    try {
-      await Promise.all(
+  const isAllSelected =
+    selected.length === templates.length && selected.length > 0;
+  const {
+    isLoading: isDeleteLoading,
+    deleteItems: deleteTemplates,
+    deletionError,
+    clearDeletionError,
+  } = useDeleteItems(
+    useCallback(() => {
+      return Promise.all(
         selected.map(({ type, id }) => {
-          let deletePromise;
           if (type === 'job_template') {
-            deletePromise = JobTemplatesAPI.destroy(id);
-          } else if (type === 'workflow_job_template') {
-            deletePromise = WorkflowJobTemplatesAPI.destroy(id);
+            return JobTemplatesAPI.destroy(id);
           }
-          return deletePromise;
+          if (type === 'workflow_job_template') {
+            return WorkflowJobTemplatesAPI.destroy(id);
+          }
+          return false;
         })
       );
-      this.setState({ itemCount: itemCount - selected.length });
-    } catch (err) {
-      this.setState({ deletionError: err });
-    } finally {
-      await this.loadTemplates();
+    }, [selected]),
+    {
+      qsConfig: QS_CONFIG,
+      allItemsSelected: isAllSelected,
+      fetchItems: fetchTemplates,
     }
-  }
+  );
 
-  async loadTemplates() {
-    const { location } = this.props;
-    const { actions: cachedActions } = this.state;
-    const params = parseQueryString(QS_CONFIG, location.search);
+  const handleTemplateDelete = async () => {
+    await deleteTemplates();
+    setSelected([]);
+  };
 
-    let optionsPromise;
-    if (cachedActions) {
-      optionsPromise = Promise.resolve({ data: { actions: cachedActions } });
+  const handleSelectAll = isSelected => {
+    setSelected(isSelected ? [...templates] : []);
+  };
+
+  const handleSelect = template => {
+    if (selected.some(s => s.id === template.id)) {
+      setSelected(selected.filter(s => s.id !== template.id));
     } else {
-      optionsPromise = JobTemplatesAPI.readOptions();
+      setSelected(selected.concat(template));
     }
+  };
 
-    const promises = Promise.all([
-      JobTemplatesAPI.read(params),
-      optionsPromise,
-    ]);
+  const canAddJT =
+    jtActions && Object.prototype.hasOwnProperty.call(jtActions, 'POST');
+  const canAddWFJT =
+    wfjtActions && Object.prototype.hasOwnProperty.call(wfjtActions, 'POST');
 
-    this.setState({ contentError: null, hasContentLoading: true });
-
-    try {
-      const [
-        {
-          data: { count, results },
-        },
-        {
-          data: { actions },
-        },
-      ] = await promises;
-
-      this.setState({
-        actions,
-        itemCount: count,
-        templates: results,
-        selected: [],
-      });
-    } catch (err) {
-      this.setState({ contentError: err });
-    } finally {
-      this.setState({ hasContentLoading: false });
-    }
-  }
-
-  render() {
-    const {
-      contentError,
-      hasContentLoading,
-      deletionError,
-      templates,
-      itemCount,
-      selected,
-      isAddOpen,
-      actions,
-    } = this.state;
-    const { match, i18n } = this.props;
-    const canAdd =
-      actions && Object.prototype.hasOwnProperty.call(actions, 'POST');
-    const isAllSelected = selected.length === templates.length;
-    return (
-      <PageSection>
-        <Card>
-          <PaginatedDataList
-            contentError={contentError}
-            hasContentLoading={hasContentLoading}
-            items={templates}
-            itemCount={itemCount}
-            itemName={i18n._(t`Template`)}
-            qsConfig={QS_CONFIG}
-            toolbarColumns={[
-              {
-                name: i18n._(t`Name`),
-                key: 'name',
-                isSortable: true,
-                isSearchable: true,
-              },
-              {
-                name: i18n._(t`Modified`),
-                key: 'modified',
-                isSortable: true,
-                isNumeric: true,
-              },
-              {
-                name: i18n._(t`Created`),
-                key: 'created',
-                isSortable: true,
-                isNumeric: true,
-              },
-            ]}
-            renderToolbar={props => (
-              <DatalistToolbar
-                {...props}
-                showSelectAll
-                showExpandCollapse
-                isAllSelected={isAllSelected}
-                onSelectAll={this.handleSelectAll}
-                additionalControls={[
-                  <ToolbarDeleteButton
-                    key="delete"
-                    onDelete={this.handleTemplateDelete}
-                    itemsToDelete={selected}
-                    itemName={i18n._(t`Template`)}
-                  />,
-                  canAdd && (
-                    <Dropdown
-                      key="add"
-                      isPlain
-                      isOpen={isAddOpen}
-                      position={DropdownPosition.right}
-                      onSelect={this.handleAddSelect}
-                      toggle={
-                        <ToolbarAddButton onClick={this.handleAddToggle} />
-                      }
-                      dropdownItems={[
-                        <DropdownItem key="job">
-                          <Link to={`${match.url}/job_template/add/`}>
-                            {i18n._(t`Job Template`)}
-                          </Link>
-                        </DropdownItem>,
-                        <DropdownItem key="workflow">
-                          <Link to={`${match.url}_workflow/add/`}>
-                            {i18n._(t`Workflow Template`)}
-                          </Link>
-                        </DropdownItem>,
-                      ]}
-                    />
-                  ),
-                ]}
-              />
-            )}
-            renderItem={template => (
-              <TemplateListItem
-                key={template.id}
-                value={template.name}
-                template={template}
-                detailUrl={`${match.url}/${template.type}/${template.id}`}
-                onSelect={() => this.handleSelect(template)}
-                isSelected={selected.some(row => row.id === template.id)}
-              />
-            )}
-            emptyStateControls={
-              canAdd && (
-                <Dropdown
-                  key="add"
-                  isPlain
-                  isOpen={isAddOpen}
-                  position={DropdownPosition.right}
-                  onSelect={this.handleAddSelect}
-                  toggle={<ToolbarAddButton onClick={this.handleAddToggle} />}
-                  dropdownItems={[
-                    <DropdownItem key="job">
-                      <Link to={`${match.url}/job_template/add/`}>
-                        {i18n._(t`Job Template`)}
-                      </Link>
-                    </DropdownItem>,
-                    <DropdownItem key="workflow">
-                      <Link to={`${match.url}_workflow/add/`}>
-                        {i18n._(t`Workflow Template`)}
-                      </Link>
-                    </DropdownItem>,
-                  ]}
-                />
-              )
-            }
-          />
-        </Card>
-        <AlertModal
-          isOpen={deletionError}
-          variant="danger"
-          title={i18n._(t`Error!`)}
-          onClose={this.handleDeleteErrorClose}
-        >
-          {i18n._(t`Failed to delete one or more template.`)}
-          <ErrorDetail error={deletionError} />
-        </AlertModal>
-      </PageSection>
+  const addTemplate = i18n._(t`Add job template`);
+  const addWFTemplate = i18n._(t`Add workflow template`);
+  const addDropDownButton = [];
+  if (canAddJT) {
+    addDropDownButton.push(
+      <DropdownItem
+        key={addTemplate}
+        component={Link}
+        to="/templates/job_template/add/"
+        aria-label={addTemplate}
+      >
+        {addTemplate}
+      </DropdownItem>
     );
   }
+  if (canAddWFJT) {
+    addDropDownButton.push(
+      <DropdownItem
+        component={Link}
+        to="/templates/workflow_job_template/add/"
+        key={addWFTemplate}
+        aria-label={addWFTemplate}
+      >
+        {addWFTemplate}
+      </DropdownItem>
+    );
+  }
+  const addButton = (
+    <AddDropDownButton key="add" dropdownItems={addDropDownButton} />
+  );
+
+  return (
+    <Fragment>
+      <Card>
+        <PaginatedDataList
+          contentError={contentError}
+          hasContentLoading={isLoading || isDeleteLoading}
+          items={templates}
+          itemCount={count}
+          pluralizedItemName={i18n._(t`Templates`)}
+          qsConfig={QS_CONFIG}
+          onRowClick={handleSelect}
+          toolbarSearchColumns={[
+            {
+              name: i18n._(t`Name`),
+              key: 'name__icontains',
+              isDefault: true,
+            },
+            {
+              name: i18n._(t`Description`),
+              key: 'description__icontains',
+            },
+            {
+              name: i18n._(t`Type`),
+              key: 'or__type',
+              options: [
+                [`job_template`, i18n._(t`Job Template`)],
+                [`workflow_job_template`, i18n._(t`Workflow Template`)],
+              ],
+            },
+            {
+              name: i18n._(t`Playbook name`),
+              key: 'job_template__playbook__icontains',
+            },
+            {
+              name: i18n._(t`Created By (Username)`),
+              key: 'created_by__username__icontains',
+            },
+            {
+              name: i18n._(t`Modified By (Username)`),
+              key: 'modified_by__username__icontains',
+            },
+          ]}
+          toolbarSortColumns={[
+            {
+              name: i18n._(t`Inventory`),
+              key: 'job_template__inventory__id',
+            },
+            {
+              name: i18n._(t`Last Job Run`),
+              key: 'last_job_run',
+            },
+            {
+              name: i18n._(t`Modified`),
+              key: 'modified',
+            },
+            {
+              name: i18n._(t`Name`),
+              key: 'name',
+            },
+            {
+              name: i18n._(t`Project`),
+              key: 'jobtemplate__project__id',
+            },
+            {
+              name: i18n._(t`Type`),
+              key: 'type',
+            },
+          ]}
+          toolbarSearchableKeys={searchableKeys}
+          toolbarRelatedSearchableKeys={relatedSearchableKeys}
+          renderToolbar={props => (
+            <DatalistToolbar
+              {...props}
+              showSelectAll
+              isAllSelected={isAllSelected}
+              onSelectAll={handleSelectAll}
+              qsConfig={QS_CONFIG}
+              additionalControls={[
+                ...(canAddJT || canAddWFJT ? [addButton] : []),
+                <ToolbarDeleteButton
+                  key="delete"
+                  onDelete={handleTemplateDelete}
+                  itemsToDelete={selected}
+                  pluralizedItemName="Templates"
+                />,
+              ]}
+            />
+          )}
+          renderItem={template => (
+            <TemplateListItem
+              key={template.id}
+              value={template.name}
+              template={template}
+              detailUrl={`/templates/${template.type}/${template.id}`}
+              onSelect={() => handleSelect(template)}
+              isSelected={selected.some(row => row.id === template.id)}
+              fetchTemplates={fetchTemplates}
+            />
+          )}
+          emptyStateControls={(canAddJT || canAddWFJT) && addButton}
+        />
+      </Card>
+      <AlertModal
+        aria-label={i18n._(t`Deletion Error`)}
+        isOpen={deletionError}
+        variant="error"
+        title={i18n._(t`Error!`)}
+        onClose={clearDeletionError}
+      >
+        {i18n._(t`Failed to delete one or more templates.`)}
+        <ErrorDetail error={deletionError} />
+      </AlertModal>
+    </Fragment>
+  );
 }
 
-export { TemplatesList as _TemplatesList };
-export default withI18n()(withRouter(TemplatesList));
+export default withI18n()(TemplateList);

@@ -6,7 +6,6 @@
 # Django
 from django.conf import settings
 from django.db import models
-from django.db.models import Q
 from django.contrib.auth.models import User
 from django.contrib.sessions.models import Session
 from django.utils.timezone import now as tz_now
@@ -46,10 +45,21 @@ class Organization(CommonModel, NotificationFieldsModel, ResourceMixin, CustomVi
         blank=True,
         through='OrganizationInstanceGroupMembership'
     )
+    galaxy_credentials = OrderedManyToManyField(
+        'Credential',
+        blank=True,
+        through='OrganizationGalaxyCredentialMembership',
+        related_name='%(class)s_galaxy_credentials'
+    )
     max_hosts = models.PositiveIntegerField(
         blank=True,
         default=0,
         help_text=_('Maximum number of hosts allowed to be managed by this organization.'),
+    )
+    notification_templates_approvals = models.ManyToManyField(
+        "NotificationTemplate",
+        blank=True,
+        related_name='%(class)s_notification_templates_for_approvals'
     )
 
     admin_role = ImplicitRoleField(
@@ -101,12 +111,24 @@ class Organization(CommonModel, NotificationFieldsModel, ResourceMixin, CustomVi
     RelatedJobsMixin
     '''
     def _get_related_jobs(self):
-        project_ids = self.projects.all().values_list('id')
-        return UnifiedJob.objects.non_polymorphic().filter(
-            Q(Job___project__in=project_ids) |
-            Q(ProjectUpdate___project__in=project_ids) |
-            Q(InventoryUpdate___inventory_source__inventory__organization=self)
-        )
+        return UnifiedJob.objects.non_polymorphic().filter(organization=self)
+
+
+class OrganizationGalaxyCredentialMembership(models.Model):
+
+    organization = models.ForeignKey(
+        'Organization',
+        on_delete=models.CASCADE
+    )
+    credential = models.ForeignKey(
+        'Credential',
+        on_delete=models.CASCADE
+    )
+    position = models.PositiveIntegerField(
+        null=True,
+        default=None,
+        db_index=True,
+    )
 
 
 class Team(CommonModelNameNotUnique, ResourceMixin):

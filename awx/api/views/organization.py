@@ -7,6 +7,7 @@ import logging
 # Django
 from django.db.models import Count
 from django.contrib.contenttypes.models import ContentType
+from django.utils.translation import ugettext_lazy as _
 
 # AWX
 from awx.main.models import (
@@ -21,6 +22,7 @@ from awx.main.models import (
     User,
     Team,
     InstanceGroup,
+    Credential
 )
 from awx.api.generics import (
     ListCreateAPIView,
@@ -28,6 +30,7 @@ from awx.api.generics import (
     SubListAPIView,
     SubListCreateAttachDetachAPIView,
     SubListAttachDetachAPIView,
+    SubListCreateAPIView,
     ResourceAccessList,
     BaseUsersList,
 )
@@ -35,14 +38,14 @@ from awx.api.generics import (
 from awx.api.serializers import (
     OrganizationSerializer,
     InventorySerializer,
-    ProjectSerializer,
     UserSerializer,
     TeamSerializer,
     ActivityStreamSerializer,
     RoleSerializer,
     NotificationTemplateSerializer,
-    WorkflowJobTemplateSerializer,
     InstanceGroupSerializer,
+    ProjectSerializer, JobTemplateSerializer, WorkflowJobTemplateSerializer,
+    CredentialSerializer
 )
 from awx.api.views.mixin import (
     RelatedJobsPreventDeleteMixin,
@@ -94,7 +97,7 @@ class OrganizationDetail(RelatedJobsPreventDeleteMixin, RetrieveUpdateDestroyAPI
         org_counts['projects'] = Project.accessible_objects(**access_kwargs).filter(
             organization__id=org_id).count()
         org_counts['job_templates'] = JobTemplate.accessible_objects(**access_kwargs).filter(
-            project__organization__id=org_id).count()
+            organization__id=org_id).count()
 
         full_context['related_field_counts'] = {}
         full_context['related_field_counts'][org_id] = org_counts
@@ -128,21 +131,27 @@ class OrganizationAdminsList(BaseUsersList):
     ordering = ('username',)
 
 
-class OrganizationProjectsList(SubListCreateAttachDetachAPIView):
+class OrganizationProjectsList(SubListCreateAPIView):
 
     model = Project
     serializer_class = ProjectSerializer
     parent_model = Organization
-    relationship = 'projects'
     parent_key = 'organization'
 
 
-class OrganizationWorkflowJobTemplatesList(SubListCreateAttachDetachAPIView):
+class OrganizationJobTemplatesList(SubListCreateAPIView):
+
+    model = JobTemplate
+    serializer_class = JobTemplateSerializer
+    parent_model = Organization
+    parent_key = 'organization'
+
+
+class OrganizationWorkflowJobTemplatesList(SubListCreateAPIView):
 
     model = WorkflowJobTemplate
     serializer_class = WorkflowJobTemplateSerializer
     parent_model = Organization
-    relationship = 'workflows'
     parent_key = 'organization'
 
 
@@ -195,12 +204,31 @@ class OrganizationNotificationTemplatesSuccessList(OrganizationNotificationTempl
     relationship = 'notification_templates_success'
 
 
+class OrganizationNotificationTemplatesApprovalList(OrganizationNotificationTemplatesAnyList):
+
+    relationship = 'notification_templates_approvals'
+
+
 class OrganizationInstanceGroupsList(SubListAttachDetachAPIView):
 
     model = InstanceGroup
     serializer_class = InstanceGroupSerializer
     parent_model = Organization
     relationship = 'instance_groups'
+
+
+class OrganizationGalaxyCredentialsList(SubListAttachDetachAPIView):
+
+    model = Credential
+    serializer_class = CredentialSerializer
+    parent_model = Organization
+    relationship = 'galaxy_credentials'
+
+    def is_valid_relation(self, parent, sub, created=False):
+        if sub.kind != 'galaxy_api_token':
+            return {'msg': _(
+                f"Credential must be a Galaxy credential, not {sub.credential_type.name}."
+            )}
 
 
 class OrganizationAccessList(ResourceAccessList):

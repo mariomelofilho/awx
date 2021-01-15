@@ -9,6 +9,9 @@ import os
 # Django
 from django.core.management.base import CommandError
 
+# for license errors
+from rest_framework.exceptions import PermissionDenied
+
 # AWX
 from awx.main.management.commands import inventory_import
 from awx.main.models import Inventory, Host, Group, InventorySource
@@ -83,7 +86,7 @@ class MockLoader:
         return self._data
 
 
-def mock_logging(self):
+def mock_logging(self, level):
     pass
 
 
@@ -228,7 +231,7 @@ class TestINIImports:
         assert inventory.hosts.count() == 1  # baseline worked
 
         inv_src2 = inventory.inventory_sources.create(
-            name='bar', overwrite=True
+            name='bar', overwrite=True, source='ec2'
         )
         os.environ['INVENTORY_SOURCE_ID'] = str(inv_src2.pk)
         os.environ['INVENTORY_UPDATE_ID'] = str(inv_src2.create_unified_job().pk)
@@ -322,6 +325,6 @@ def test_tower_version_compare():
             "version": "2.0.1-1068-g09684e2c41"
         }
     }
-    with pytest.raises(CommandError):
+    with pytest.raises(PermissionDenied):
         cmd.remote_tower_license_compare('very_supported')
     cmd.remote_tower_license_compare('open')

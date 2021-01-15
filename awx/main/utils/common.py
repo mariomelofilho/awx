@@ -19,9 +19,14 @@ from functools import reduce, wraps
 from decimal import Decimal
 
 # Django
-from django.core.exceptions import ObjectDoesNotExist
+from django.core.exceptions import ObjectDoesNotExist, FieldDoesNotExist
 from django.utils.translation import ugettext_lazy as _
+from django.utils.functional import cached_property
 from django.db.models.fields.related import ForeignObjectRel, ManyToManyField
+from django.db.models.fields.related_descriptors import (
+    ForwardManyToOneDescriptor,
+    ManyToManyDescriptor
+)
 from django.db.models.query import QuerySet
 from django.db.models import Q
 
@@ -31,20 +36,27 @@ from django.utils.encoding import smart_str
 from django.utils.text import slugify
 from django.apps import apps
 
+# AWX
+from awx.conf.license import get_license
+
 logger = logging.getLogger('awx.main.utils')
 
-__all__ = ['get_object_or_400', 'camelcase_to_underscore', 'underscore_to_camelcase', 'memoize', 'memoize_delete',
-           'get_ansible_version', 'get_ssh_version', 'get_licenser', 'get_awx_version', 'update_scm_url',
-           'get_type_for_model', 'get_model_for_type', 'copy_model_by_class', 'region_sorting',
-           'copy_m2m_relationships', 'prefetch_page_capabilities', 'to_python_boolean',
-           'ignore_inventory_computed_fields', 'ignore_inventory_group_removal',
-           '_inventory_updates', 'get_pk_from_dict', 'getattrd', 'getattr_dne', 'NoDefaultProvided',
-           'get_current_apps', 'set_current_apps',
-           'extract_ansible_vars', 'get_search_fields', 'get_system_task_capacity', 'get_cpu_capacity', 'get_mem_capacity',
-           'wrap_args_with_proot', 'build_proot_temp_dir', 'check_proot_installed', 'model_to_dict',
-           'model_instance_diff', 'parse_yaml_or_json', 'RequireDebugTrueOrTest',
-           'has_model_field_prefetched', 'set_environ', 'IllegalArgumentError', 'get_custom_venv_choices', 'get_external_account',
-           'task_manager_bulk_reschedule', 'schedule_task_manager', 'classproperty', 'create_temporary_fifo']
+__all__ = [
+    'get_object_or_400', 'camelcase_to_underscore', 'underscore_to_camelcase', 'memoize',
+    'memoize_delete', 'get_ansible_version', 'get_licenser', 'get_awx_http_client_headers',
+    'get_awx_version', 'update_scm_url', 'get_type_for_model', 'get_model_for_type',
+    'copy_model_by_class', 'copy_m2m_relationships',
+    'prefetch_page_capabilities', 'to_python_boolean', 'ignore_inventory_computed_fields',
+    'ignore_inventory_group_removal', '_inventory_updates', 'get_pk_from_dict', 'getattrd',
+    'getattr_dne', 'NoDefaultProvided', 'get_current_apps', 'set_current_apps',
+    'extract_ansible_vars', 'get_search_fields', 'get_system_task_capacity',
+    'get_cpu_capacity', 'get_mem_capacity', 'wrap_args_with_proot', 'build_proot_temp_dir',
+    'check_proot_installed', 'model_to_dict', 'NullablePromptPseudoField',
+    'model_instance_diff', 'parse_yaml_or_json', 'RequireDebugTrueOrTest',
+    'has_model_field_prefetched', 'set_environ', 'IllegalArgumentError',
+    'get_custom_venv_choices', 'get_external_account', 'task_manager_bulk_reschedule',
+    'schedule_task_manager', 'classproperty', 'create_temporary_fifo', 'truncate_stdout'
+]
 
 
 def get_object_or_400(klass, *args, **kwargs):
@@ -72,15 +84,6 @@ def to_python_boolean(value, allow_none=False):
         return None
     else:
         raise ValueError(_(u'Unable to convert "%s" to boolean') % value)
-
-
-def region_sorting(region):
-    # python3's removal of sorted(cmp=...) is _stupid_
-    if region[1].lower() == 'all':
-        return ''
-    elif region[1].lower().startswith('us'):
-        return region[1]
-    return 'ZZZ' + str(region[1])
 
 
 def camelcase_to_underscore(s):
@@ -158,35 +161,17 @@ def memoize_delete(function_name):
     return cache.delete(function_name)
 
 
-def _get_ansible_version(ansible_path):
+@memoize()
+def get_ansible_version():
     '''
     Return Ansible version installed.
     Ansible path needs to be provided to account for custom virtual environments
     '''
     try:
-        proc = subprocess.Popen([ansible_path, '--version'],
+        proc = subprocess.Popen(['ansible', '--version'],
                                 stdout=subprocess.PIPE)
         result = smart_str(proc.communicate()[0])
         return result.split('\n')[0].replace('ansible', '').strip()
-    except Exception:
-        return 'unknown'
-
-
-@memoize()
-def get_ansible_version():
-    return _get_ansible_version('ansible')
-
-
-@memoize()
-def get_ssh_version():
-    '''
-    Return SSH version installed.
-    '''
-    try:
-        proc = subprocess.Popen(['ssh', '-V'],
-                                stderr=subprocess.PIPE)
-        result = smart_str(proc.communicate()[1])
-        return result.split(" ")[0].split("_")[1]
     except Exception:
         return 'unknown'
 
@@ -203,34 +188,28 @@ def get_awx_version():
         return __version__
 
 
-class StubLicense(object):
-
-    features = {
-        'activity_streams': True,
-        'ha': True,
-        'ldap': True,
-        'multiple_organizations': True,
-        'surveys': True,
-        'system_tracking': True,
-        'rebranding': True,
-        'enterprise_auth': True,
-        'workflows': True,
+def get_awx_http_client_headers():
+    license = get_license().get('license_type', 'UNLICENSED')
+    headers = {
+        'Content-Type': 'application/json',
+        'User-Agent': '{} {} ({})'.format(
+            'AWX' if license == 'open' else 'Red Hat Ansible Tower',
+            get_awx_version(),
+            license
+        )
     }
-
-    def validate(self):
-        return dict(license_key='OPEN',
-                    valid_key=True,
-                    compliant=True,
-                    features=self.features,
-                    license_type='open')
+    return headers
 
 
 def get_licenser(*args, **kwargs):
+    from awx.main.utils.licensing import Licenser, OpenLicense
     try:
-        from tower_license import TowerLicense
-        return TowerLicense(*args, **kwargs)
-    except ImportError:
-        return StubLicense(*args, **kwargs)
+        if os.path.exists('/var/lib/awx/.tower_version'):
+            return Licenser(*args, **kwargs)
+        else:
+            return OpenLicense()
+    except Exception as e:
+        raise ValueError(_('Error importing Tower License: %s') % e)
 
 
 def update_scm_url(scm_type, url, username=True, password=True,
@@ -243,9 +222,8 @@ def update_scm_url(scm_type, url, username=True, password=True,
     '''
     # Handle all of the URL formats supported by the SCM systems:
     # git: https://www.kernel.org/pub/software/scm/git/docs/git-clone.html#URLS
-    # hg: http://www.selenic.com/mercurial/hg.1.html#url-paths
     # svn: http://svnbook.red-bean.com/en/1.7/svn-book.html#svn.advanced.reposurls
-    if scm_type not in ('git', 'hg', 'svn', 'insights'):
+    if scm_type not in ('git', 'svn', 'insights', 'archive'):
         raise ValueError(_('Unsupported SCM type "%s"') % str(scm_type))
     if not url.strip():
         return ''
@@ -277,8 +255,8 @@ def update_scm_url(scm_type, url, username=True, password=True,
             # SCP style before passed to git module.
             parts = urllib.parse.urlsplit('git+ssh://%s' % modified_url)
         # Handle local paths specified without file scheme (e.g. /path/to/foo).
-        # Only supported by git and hg.
-        elif scm_type in ('git', 'hg'):
+        # Only supported by git.
+        elif scm_type == 'git':
             if not url.startswith('/'):
                 parts = urllib.parse.urlsplit('file:///%s' % url)
             else:
@@ -289,9 +267,9 @@ def update_scm_url(scm_type, url, username=True, password=True,
     # Validate that scheme is valid for given scm_type.
     scm_type_schemes = {
         'git': ('ssh', 'git', 'git+ssh', 'http', 'https', 'ftp', 'ftps', 'file'),
-        'hg': ('http', 'https', 'ssh', 'file'),
         'svn': ('http', 'https', 'svn', 'svn+ssh', 'file'),
-        'insights': ('http', 'https')
+        'insights': ('http', 'https'),
+        'archive': ('http', 'https'),
     }
     if parts.scheme not in scm_type_schemes.get(scm_type, ()):
         raise ValueError(_('Unsupported %s URL') % scm_type)
@@ -320,14 +298,8 @@ def update_scm_url(scm_type, url, username=True, password=True,
         if scm_type == 'git' and parts.scheme.endswith('ssh') and parts.hostname in special_git_hosts and netloc_password:
             #raise ValueError('Password not allowed for SSH access to %s.' % parts.hostname)
             netloc_password = ''
-        special_hg_hosts = ('bitbucket.org', 'altssh.bitbucket.org')
-        if scm_type == 'hg' and parts.scheme == 'ssh' and parts.hostname in special_hg_hosts and netloc_username != 'hg':
-            raise ValueError(_('Username must be "hg" for SSH access to %s.') % parts.hostname)
-        if scm_type == 'hg' and parts.scheme == 'ssh' and netloc_password:
-            #raise ValueError('Password not supported for SSH with Mercurial.')
-            netloc_password = ''
 
-    if netloc_username and parts.scheme != 'file' and scm_type != "insights":
+    if netloc_username and parts.scheme != 'file' and scm_type not in ("insights", "archive"):
         netloc = u':'.join([urllib.parse.quote(x,safe='') for x in (netloc_username, netloc_password) if x])
     else:
         netloc = u''
@@ -354,9 +326,14 @@ def get_allowed_fields(obj, serializer_mapping):
         'oauth2accesstoken': ['last_used'],
         'oauth2application': ['client_secret']
     }
-    field_blacklist = ACTIVITY_STREAM_FIELD_EXCLUSIONS.get(obj._meta.model_name, [])
-    if field_blacklist:
-        allowed_fields = [f for f in allowed_fields if f not in field_blacklist]
+    model_name = obj._meta.model_name
+    fields_excluded = ACTIVITY_STREAM_FIELD_EXCLUSIONS.get(model_name, [])
+    # see definition of from_db for CredentialType
+    # injection logic of any managed types are incompatible with activity stream
+    if model_name == 'credentialtype' and obj.managed_by_tower and obj.namespace:
+        fields_excluded.extend(['inputs', 'injectors'])
+    if fields_excluded:
+        allowed_fields = [f for f in allowed_fields if f not in fields_excluded]
     return allowed_fields
 
 
@@ -435,6 +412,39 @@ def model_to_dict(obj, serializer_mapping=None):
     return attr_d
 
 
+class CharPromptDescriptor:
+    """Class used for identifying nullable launch config fields from class
+    ex. Schedule.limit
+    """
+    def __init__(self, field):
+        self.field = field
+
+
+class NullablePromptPseudoField:
+    """
+    Interface for pseudo-property stored in `char_prompts` dict
+    Used in LaunchTimeConfig and submodels, defined here to avoid circular imports
+    """
+    def __init__(self, field_name):
+        self.field_name = field_name
+
+    @cached_property
+    def field_descriptor(self):
+        return CharPromptDescriptor(self)
+
+    def __get__(self, instance, type=None):
+        if instance is None:
+            # for inspection on class itself
+            return self.field_descriptor
+        return instance.char_prompts.get(self.field_name, None)
+
+    def __set__(self, instance, value):
+        if value in (None, {}):
+            instance.char_prompts.pop(self.field_name, None)
+        else:
+            instance.char_prompts[self.field_name] = value
+
+
 def copy_model_by_class(obj1, Class2, fields, kwargs):
     '''
     Creates a new unsaved object of type Class2 using the fields from obj1
@@ -442,9 +452,10 @@ def copy_model_by_class(obj1, Class2, fields, kwargs):
     '''
     create_kwargs = {}
     for field_name in fields:
-        # Foreign keys can be specified as field_name or field_name_id.
-        id_field_name = '%s_id' % field_name
-        if hasattr(obj1, id_field_name):
+        descriptor = getattr(Class2, field_name)
+        if isinstance(descriptor, ForwardManyToOneDescriptor):  # ForeignKey
+            # Foreign keys can be specified as field_name or field_name_id.
+            id_field_name = '%s_id' % field_name
             if field_name in kwargs:
                 value = kwargs[field_name]
             elif id_field_name in kwargs:
@@ -454,15 +465,29 @@ def copy_model_by_class(obj1, Class2, fields, kwargs):
             if hasattr(value, 'id'):
                 value = value.id
             create_kwargs[id_field_name] = value
+        elif isinstance(descriptor, CharPromptDescriptor):
+            # difficult case of copying one launch config to another launch config
+            new_val = None
+            if field_name in kwargs:
+                new_val = kwargs[field_name]
+            elif hasattr(obj1, 'char_prompts'):
+                if field_name in obj1.char_prompts:
+                    new_val = obj1.char_prompts[field_name]
+            elif hasattr(obj1, field_name):
+                # extremely rare case where a template spawns a launch config - sliced jobs
+                new_val = getattr(obj1, field_name)
+            if new_val is not None:
+                create_kwargs.setdefault('char_prompts', {})
+                create_kwargs['char_prompts'][field_name] = new_val
+        elif isinstance(descriptor, ManyToManyDescriptor):
+            continue  # not copied in this method
         elif field_name in kwargs:
             if field_name == 'extra_vars' and isinstance(kwargs[field_name], dict):
                 create_kwargs[field_name] = json.dumps(kwargs['extra_vars'])
             elif not isinstance(Class2._meta.get_field(field_name), (ForeignObjectRel, ManyToManyField)):
                 create_kwargs[field_name] = kwargs[field_name]
         elif hasattr(obj1, field_name):
-            field_obj = obj1._meta.get_field(field_name)
-            if not isinstance(field_obj, ManyToManyField):
-                create_kwargs[field_name] = getattr(obj1, field_name)
+            create_kwargs[field_name] = getattr(obj1, field_name)
 
     # Apply class-specific extra processing for origination of unified jobs
     if hasattr(obj1, '_update_unified_job_kwargs') and obj1.__class__ != Class2:
@@ -481,7 +506,10 @@ def copy_m2m_relationships(obj1, obj2, fields, kwargs=None):
     '''
     for field_name in fields:
         if hasattr(obj1, field_name):
-            field_obj = obj1._meta.get_field(field_name)
+            try:
+                field_obj = obj1._meta.get_field(field_name)
+            except FieldDoesNotExist:
+                continue
             if isinstance(field_obj, ManyToManyField):
                 # Many to Many can be specified as field_name
                 src_field_value = getattr(obj1, field_name)
@@ -942,14 +970,17 @@ def get_custom_venv_choices(custom_paths=None):
     custom_venv_choices = []
 
     for custom_venv_path in all_venv_paths:
-        if os.path.exists(custom_venv_path):
-            custom_venv_choices.extend([
-                os.path.join(custom_venv_path, x, '')
-                for x in os.listdir(custom_venv_path)
-                if x != 'awx' and
-                os.path.isdir(os.path.join(custom_venv_path, x)) and
-                os.path.exists(os.path.join(custom_venv_path, x, 'bin', 'activate'))
-            ])
+        try:
+            if os.path.exists(custom_venv_path):
+                custom_venv_choices.extend([
+                    os.path.join(custom_venv_path, x, '')
+                    for x in os.listdir(custom_venv_path)
+                    if x != 'awx' and
+                    os.path.isdir(os.path.join(custom_venv_path, x)) and
+                    os.path.exists(os.path.join(custom_venv_path, x, 'bin', 'activate'))
+                ])
+        except Exception:
+            logger.exception("Encountered an error while discovering custom virtual environments.")
     return custom_venv_choices
 
 
@@ -1032,3 +1063,19 @@ def create_temporary_fifo(data):
     ).start()
     return path
 
+
+def truncate_stdout(stdout, size):
+    from awx.main.constants import ANSI_SGR_PATTERN
+
+    if size <= 0 or len(stdout) <= size:
+        return stdout
+
+    stdout = stdout[:(size - 1)] + u'\u2026'
+    set_count, reset_count = 0, 0
+    for m in ANSI_SGR_PATTERN.finditer(stdout):
+        if m.group() == u'\u001b[0m':
+            reset_count += 1
+        else:
+            set_count += 1
+
+    return stdout + u'\u001b[0m' * (set_count - reset_count)

@@ -1,44 +1,23 @@
 import React from 'react';
-import { shape, string, number, arrayOf } from 'prop-types';
-import { Tab, Tabs as PFTabs } from '@patternfly/react-core';
-import { withRouter } from 'react-router-dom';
-import styled from 'styled-components';
-
-const Tabs = styled(PFTabs)`
-  --pf-c-tabs__button--PaddingLeft: 20px;
-  --pf-c-tabs__button--PaddingRight: 20px;
-
-  .pf-c-tabs__list {
-    li:first-of-type .pf-c-tabs__button {
-      &::before {
-        border-left: none;
-      }
-      &::after {
-        margin-left: 0;
-      }
-    }
-  }
-
-  &:not(.pf-c-tabs__item)::before {
-    position: absolute;
-    top: 0;
-    right: 0;
-    bottom: 0;
-    left: 0;
-    content: '';
-    border: solid var(--pf-c-tabs__item--BorderColor);
-    border-width: var(--pf-c-tabs__item--BorderWidth) 0
-      var(--pf-c-tabs__item--BorderWidth) 0;
-  }
-`;
+import { shape, string, number, arrayOf, node, oneOfType } from 'prop-types';
+import { Tab, Tabs, TabTitleText } from '@patternfly/react-core';
+import { useHistory, useLocation } from 'react-router-dom';
 
 function RoutedTabs(props) {
-  const { history, tabsArray } = props;
+  const { tabsArray } = props;
+  const history = useHistory();
+  const location = useLocation();
 
   const getActiveTabId = () => {
-    const match = tabsArray.find(tab => tab.link === history.location.pathname);
+    const match = tabsArray.find(tab => tab.link === location.pathname);
     if (match) {
       return match.id;
+    }
+    const subpathMatch = tabsArray.find(tab =>
+      location.pathname.startsWith(tab.link)
+    );
+    if (subpathMatch) {
+      return subpathMatch.id;
     }
     return 0;
   };
@@ -54,30 +33,26 @@ function RoutedTabs(props) {
     <Tabs activeKey={getActiveTabId()} onSelect={handleTabSelect}>
       {tabsArray.map(tab => (
         <Tab
-          aria-label={`${tab.name}`}
+          aria-label={typeof tab.name === 'string' ? tab.name : ''}
           eventKey={tab.id}
           key={tab.id}
           link={tab.link}
-          title={tab.name}
+          title={<TabTitleText>{tab.name}</TabTitleText>}
+          role="tab"
         />
       ))}
     </Tabs>
   );
 }
+
 RoutedTabs.propTypes = {
-  history: shape({
-    location: shape({
-      pathname: string.isRequired,
-    }).isRequired,
-  }).isRequired,
   tabsArray: arrayOf(
     shape({
       id: number.isRequired,
       link: string.isRequired,
-      name: string.isRequired,
+      name: oneOfType([string.isRequired, node.isRequired]),
     })
   ).isRequired,
 };
 
-export { RoutedTabs as _RoutedTabs };
-export default withRouter(RoutedTabs);
+export default RoutedTabs;

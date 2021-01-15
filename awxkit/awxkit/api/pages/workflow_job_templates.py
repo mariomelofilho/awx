@@ -13,6 +13,7 @@ from . import page
 class WorkflowJobTemplate(HasCopy, HasCreate, HasNotifications, HasSurvey, UnifiedJobTemplate):
 
     optional_dependencies = [Organization]
+    NATURAL_KEY = ('organization', 'name')
 
     def launch(self, payload={}):
         """Launch using related->launch endpoint."""
@@ -25,8 +26,9 @@ class WorkflowJobTemplate(HasCopy, HasCreate, HasNotifications, HasSurvey, Unifi
         # return job
         jobs_pg = self.related.workflow_jobs.get(id=result.workflow_job)
         if jobs_pg.count != 1:
-            msg = "workflow_job_template launched (id:{}) but job not found in response at {}/workflow_jobs/" % \
-                  (result.json['workflow_job'], self.url)
+            msg = "workflow_job_template launched (id:{}) but job not found in response at {}/workflow_jobs/".format(
+                result.json['workflow_job'], self.url
+            )
             raise exc.UnexpectedAWXState(msg)
         return jobs_pg.results[0]
 
@@ -34,7 +36,18 @@ class WorkflowJobTemplate(HasCopy, HasCreate, HasNotifications, HasSurvey, Unifi
         payload = PseudoNamespace(name=kwargs.get('name') or 'WorkflowJobTemplate - {}'.format(random_title()),
                                   description=kwargs.get('description') or random_title(10))
 
-        optional_fields = ("allow_simultaneous", "ask_variables_on_launch", "survey_enabled")
+        optional_fields = (
+            "allow_simultaneous",
+            "ask_variables_on_launch",
+            "ask_inventory_on_launch",
+            "ask_scm_branch_on_launch",
+            "ask_limit_on_launch",
+            "limit",
+            "scm_branch",
+            "survey_enabled",
+            "webhook_service",
+            "webhook_credential",
+        )
         update_payload(payload, optional_fields, kwargs)
 
         extra_vars = kwargs.get('extra_vars', not_provided)
@@ -48,8 +61,15 @@ class WorkflowJobTemplate(HasCopy, HasCreate, HasNotifications, HasSurvey, Unifi
 
         if kwargs.get('inventory'):
             payload.inventory = kwargs.get('inventory').id
-        if kwargs.get('ask_inventory_on_launch'):
-            payload.ask_inventory_on_launch = kwargs.get('ask_inventory_on_launch')
+
+        if kwargs.get('webhook_credential'):
+            webhook_cred = kwargs.get('webhook_credential')
+            if isinstance(webhook_cred, int):
+                payload.update(webhook_credential=int(webhook_cred))
+            elif hasattr(webhook_cred, 'id'):
+                payload.update(webhook_credential=webhook_cred.id)
+            else:
+                raise AttributeError("Webhook credential must either be integer of pkid or Credential object")
 
         return payload
 
@@ -81,7 +101,8 @@ class WorkflowJobTemplates(page.PageList, WorkflowJobTemplate):
     pass
 
 
-page.register_page([resources.workflow_job_templates], WorkflowJobTemplates)
+page.register_page([resources.workflow_job_templates,
+                    resources.related_workflow_job_templates], WorkflowJobTemplates)
 
 
 class WorkflowJobTemplateLaunch(base.Base):

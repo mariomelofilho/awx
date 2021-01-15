@@ -6,16 +6,15 @@ import pkg_resources
 import sys
 
 from requests.exceptions import RequestException
-import six
 
 from .custom import handle_custom_actions
 from .format import (add_authentication_arguments,
                      add_output_formatting_arguments,
                      FORMATTERS, format_response)
-from .options import ResourceOptionsParser
+from .options import ResourceOptionsParser, UNIQUENESS_RULES
 from .resource import parse_resource, is_control_resource
 from awxkit import api, config, utils, exceptions, WSClient  # noqa
-from awxkit.cli.utils import HelpfulArgumentParser, cprint, disable_color
+from awxkit.cli.utils import HelpfulArgumentParser, cprint, disable_color, colored
 from awxkit.awx.utils import uses_sessions  # noqa
 
 
@@ -71,9 +70,10 @@ class CLI(object):
     subparsers = {}
     original_action = None
 
-    def __init__(self, stdout=sys.stdout, stderr=sys.stderr):
+    def __init__(self, stdout=sys.stdout, stderr=sys.stderr, stdin=sys.stdin):
         self.stdout = stdout
         self.stderr = stderr
+        self.stdin = stdin
 
     def get_config(self, key):
         """Helper method for looking up the value of a --conf.xyz flag"""
@@ -88,7 +88,7 @@ class CLI(object):
         token = self.get_config('token')
         if token:
             self.root.connection.login(
-                None, None, token=token, auth_type='Bearer'
+                None, None, token=token,
             )
         else:
             config.use_sessions = True
@@ -130,7 +130,14 @@ class CLI(object):
             raise
 
     def fetch_version_root(self):
-        self.v2 = self.root.get().available_versions.v2.get()
+        try:
+            self.v2 = self.root.get().available_versions.v2.get()
+        except AttributeError:
+            raise RuntimeError(
+                'An error occurred while fetching {}/api/'.format(
+                    self.get_config('host')
+                )
+            )
 
     def parse_resource(self, skip_deprecated=False):
         """Attempt to parse the <resource> (e.g., jobs) specified on the CLI
@@ -159,26 +166,44 @@ class CLI(object):
                 response = getattr(resource, self.method)()
             else:
                 response = self.parse_action(resource)
+
+            _filter = self.get_config('filter')
+
+            # human format for metrics, settings is special
+            if (
+                self.resource in ('metrics', 'settings') and
+                self.get_config('format') == 'human'
+            ):
+                response.json = {
+                    'count': len(response.json),
+                    'results': [
+                        {'key': k, 'value': v}
+                        for k, v in response.json.items()
+                    ]
+                }
+                _filter = 'key, value'
+
+            if (
+                self.get_config('format') == 'human' and
+                _filter == '.' and
+                self.resource in UNIQUENESS_RULES
+            ):
+                _filter = ', '.join(UNIQUENESS_RULES[self.resource])
+
             formatted = format_response(
                 response,
                 fmt=self.get_config('format'),
-                filter=self.get_config('filter'),
+                filter=_filter,
                 changed=self.original_action in (
                     'modify', 'create', 'associate', 'disassociate'
                 )
             )
             if formatted:
                 print(utils.to_str(formatted), file=self.stdout)
+            if hasattr(response, 'rc'):
+                raise SystemExit(response.rc)
         else:
             self.parser.print_help()
-
-            if six.PY2 and not self.help:
-                # Unfortunately, argparse behavior between py2 and py3
-                # changed in a notable way when required subparsers
-                # have invalid (or missing) arguments specified
-                # see: https://github.com/python/cpython/commit/f97c59aaba2d93e48cbc6d25f7ff9f9c87f8d0b2
-                print('\nargument resource: invalid choice')
-                raise SystemExit(2)
 
     def parse_action(self, page, from_sphinx=False):
         """Perform an HTTP OPTIONS request
@@ -201,7 +226,13 @@ class CLI(object):
         subparsers.required = True
 
         # parse the action from OPTIONS
-        parser = ResourceOptionsParser(page, self.resource, subparsers)
+        parser = ResourceOptionsParser(self.v2, page, self.resource, subparsers)
+        if parser.deprecated:
+            description = 'This resource has been deprecated and will be removed in a future release.'
+            if not from_sphinx:
+                description = colored(description, 'yellow')
+            self.subparsers[self.resource].description = description
+
         if from_sphinx:
             # Our Sphinx plugin runs `parse_action` for *every* available
             # resource + action in the API so that it can generate usage
@@ -220,10 +251,11 @@ class CLI(object):
         # parse any action arguments
         if self.resource != 'settings':
             for method in ('list', 'modify', 'create'):
-                parser.build_query_arguments(
-                    method,
-                    'GET' if method == 'list' else 'POST'
-                )
+                if method in parser.parser.choices:
+                    parser.build_query_arguments(
+                        method,
+                        'GET' if method == 'list' else 'POST'
+                    )
         if from_sphinx:
             parsed, extra = self.parser.parse_known_args(self.argv)
         else:

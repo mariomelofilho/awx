@@ -13,6 +13,7 @@ from urllib.parse import urljoin
 
 # Django
 from django.conf import settings
+from django.core.exceptions import ValidationError
 from django.db import models
 #from django.core.cache import cache
 from django.utils.encoding import smart_str
@@ -28,7 +29,7 @@ from awx.api.versioning import reverse
 from awx.main.models.base import (
     BaseModel, CreatedModifiedModel,
     prevent_search, accepts_json,
-    JOB_TYPE_CHOICES, VERBOSITY_CHOICES,
+    JOB_TYPE_CHOICES, NEW_JOB_TYPE_CHOICES, VERBOSITY_CHOICES,
     VarsDictProperty
 )
 from awx.main.models.events import JobEvent, SystemJobEvent
@@ -39,7 +40,7 @@ from awx.main.models.notifications import (
     NotificationTemplate,
     JobNotificationMixin,
 )
-from awx.main.utils import parse_yaml_or_json, getattr_dne
+from awx.main.utils import parse_yaml_or_json, getattr_dne, NullablePromptPseudoField
 from awx.main.fields import ImplicitRoleField, JSONField, AskForField
 from awx.main.models.mixins import (
     ResourceMixin,
@@ -48,6 +49,8 @@ from awx.main.models.mixins import (
     TaskManagerJobMixin,
     CustomVirtualEnvMixin,
     RelatedJobsMixin,
+    WebhookMixin,
+    WebhookTemplateMixin,
 )
 
 
@@ -187,7 +190,7 @@ class JobOptions(BaseModel):
         return needed
 
 
-class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, ResourceMixin, CustomVirtualEnvMixin, RelatedJobsMixin):
+class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, ResourceMixin, CustomVirtualEnvMixin, RelatedJobsMixin, WebhookTemplateMixin):
     '''
     A job template is a reusable job definition for applying a project (with
     playbook) to an inventory source with a given credential.
@@ -196,12 +199,17 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
         'labels', 'instance_groups', 'credentials', 'survey_spec'
     ]
     FIELDS_TO_DISCARD_AT_COPY = ['vault_credential', 'credential']
-    SOFT_UNIQUE_TOGETHER = [('polymorphic_ctype', 'name')]
+    SOFT_UNIQUE_TOGETHER = [('polymorphic_ctype', 'name', 'organization')]
 
     class Meta:
         app_label = 'main'
         ordering = ('name',)
 
+    job_type = models.CharField(
+        max_length=64,
+        choices=NEW_JOB_TYPE_CHOICES,
+        default='run',
+    )
     host_config_key = prevent_search(models.CharField(
         max_length=1024,
         blank=True,
@@ -254,13 +262,17 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
     )
 
     admin_role = ImplicitRoleField(
-        parent_role=['project.organization.job_template_admin_role', 'inventory.organization.job_template_admin_role']
+        parent_role=['organization.job_template_admin_role']
     )
     execute_role = ImplicitRoleField(
-        parent_role=['admin_role', 'project.organization.execute_role', 'inventory.organization.execute_role'],
+        parent_role=['admin_role', 'organization.execute_role'],
     )
     read_role = ImplicitRoleField(
-        parent_role=['project.organization.auditor_role', 'inventory.organization.auditor_role', 'execute_role', 'admin_role'],
+        parent_role=[
+            'organization.auditor_role',
+            'inventory.organization.auditor_role',  # partial support for old inheritance via inventory
+            'execute_role', 'admin_role'
+        ],
     )
 
 
@@ -271,7 +283,7 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
     @classmethod
     def _get_unified_job_field_names(cls):
         return set(f.name for f in JobOptions._meta.fields) | set(
-            ['name', 'description', 'schedule', 'survey_passwords', 'labels', 'credentials',
+            ['name', 'description', 'organization', 'survey_passwords', 'labels', 'credentials',
              'job_slice_number', 'job_slice_count']
         )
 
@@ -291,6 +303,11 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
     def resources_needed_to_start(self):
         return [fd for fd in ['project', 'inventory'] if not getattr(self, '{}_id'.format(fd))]
 
+    def clean_forks(self):
+        if settings.MAX_FORKS > 0 and self.forks > settings.MAX_FORKS:
+            raise ValidationError(_(f'Maximum number of forks ({settings.MAX_FORKS}) exceeded.'))
+        return self.forks
+
     def create_job(self, **kwargs):
         '''
         Create a new job based on this template.
@@ -305,6 +322,41 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
             return min(self.job_slice_count, actual_inventory.hosts.count())
         else:
             return self.job_slice_count
+
+    def save(self, *args, **kwargs):
+        update_fields = kwargs.get('update_fields', [])
+        # if project is deleted for some reason, then keep the old organization
+        # to retain ownership for organization admins
+        if self.project and self.project.organization_id != self.organization_id:
+            self.organization_id = self.project.organization_id
+            if 'organization' not in update_fields and 'organization_id' not in update_fields:
+                update_fields.append('organization_id')
+        return super(JobTemplate, self).save(*args, **kwargs)
+
+    def validate_unique(self, exclude=None):
+        """Custom over-ride for JT specifically
+        because organization is inferred from project after full_clean is finished
+        thus the organization field is not yet set when validation happens
+        """
+        errors = []
+        for ut in JobTemplate.SOFT_UNIQUE_TOGETHER:
+            kwargs = {'name': self.name}
+            if self.project:
+                kwargs['organization'] = self.project.organization_id
+            else:
+                kwargs['organization'] = None
+            qs = JobTemplate.objects.filter(**kwargs)
+            if self.pk:
+                qs = qs.exclude(pk=self.pk)
+            if qs.exists():
+                errors.append(
+                    '%s with this (%s) combination already exists.' % (
+                        JobTemplate.__name__,
+                        ', '.join(set(ut) - {'polymorphic_ctype'})
+                    )
+                )
+        if errors:
+            raise ValidationError(errors)
 
     def create_unified_job(self, **kwargs):
         prevent_slicing = kwargs.pop('_prevent_slicing', False)
@@ -387,13 +439,9 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
             field = self._meta.get_field(field_name)
             if isinstance(field, models.ManyToManyField):
                 old_value = set(old_value.all())
-                if getattr(self, '_deprecated_credential_launch', False):
-                    # TODO: remove this code branch when support for `extra_credentials` goes away
-                    new_value = set(kwargs[field_name])
-                else:
-                    new_value = set(kwargs[field_name]) - old_value
-                    if not new_value:
-                        continue
+                new_value = set(kwargs[field_name]) - old_value
+                if not new_value:
+                    continue
 
             if new_value == old_value:
                 # no-op case: Fields the same as template's value
@@ -466,13 +514,13 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
         success_notification_templates = list(base_notification_templates.filter(
             unifiedjobtemplate_notification_templates_for_success__in=[self, self.project]))
         # Get Organization NotificationTemplates
-        if self.project is not None and self.project.organization is not None:
+        if self.organization is not None:
             error_notification_templates = set(error_notification_templates + list(base_notification_templates.filter(
-                organization_notification_templates_for_errors=self.project.organization)))
+                organization_notification_templates_for_errors=self.organization)))
             started_notification_templates = set(started_notification_templates + list(base_notification_templates.filter(
-                organization_notification_templates_for_started=self.project.organization)))
+                organization_notification_templates_for_started=self.organization)))
             success_notification_templates = set(success_notification_templates + list(base_notification_templates.filter(
-                organization_notification_templates_for_success=self.project.organization)))
+                organization_notification_templates_for_success=self.organization)))
         return dict(error=list(error_notification_templates),
                     started=list(started_notification_templates),
                     success=list(success_notification_templates))
@@ -484,7 +532,7 @@ class JobTemplate(UnifiedJobTemplate, JobOptions, SurveyJobTemplateMixin, Resour
         return UnifiedJob.objects.filter(unified_job_template=self)
 
 
-class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskManagerJobMixin, CustomVirtualEnvMixin):
+class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskManagerJobMixin, CustomVirtualEnvMixin, WebhookMixin):
     '''
     A job applies a project (with playbook) to an inventory source with a given
     credential.  It represents a single invocation of ansible-playbook with the
@@ -575,7 +623,7 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
         for virtualenv in (
             self.job_template.custom_virtualenv if self.job_template else None,
             self.project.custom_virtualenv,
-            self.project.organization.custom_virtualenv if self.project.organization else None
+            self.organization.custom_virtualenv if self.organization else None
         ):
             if virtualenv:
                 return virtualenv
@@ -627,15 +675,17 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
 
     @property
     def task_impact(self):
-        # NOTE: We sorta have to assume the host count matches and that forks default to 5
-        from awx.main.models.inventory import Host
         if self.launch_type == 'callback':
             count_hosts = 2
         else:
-            count_hosts = Host.objects.filter(inventory__jobs__pk=self.pk).count()
-            if self.job_slice_count > 1:
-                # Integer division intentional
-                count_hosts = (count_hosts + self.job_slice_count - self.job_slice_number) // self.job_slice_count
+            # If for some reason we can't count the hosts then lets assume the impact as forks
+            if self.inventory is not None:
+                count_hosts = self.inventory.total_hosts
+                if self.job_slice_count > 1:
+                    # Integer division intentional
+                    count_hosts = (count_hosts + self.job_slice_count - self.job_slice_number) // self.job_slice_count
+            else:
+                count_hosts = 5 if self.forks == 0 else self.forks
         return min(count_hosts, 5 if self.forks == 0 else self.forks) + 1
 
     @property
@@ -666,6 +716,14 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
     def processed_hosts(self):
         return self._get_hosts(job_host_summaries__processed__gt=0)
 
+    @property
+    def ignored_hosts(self):
+        return self._get_hosts(job_host_summaries__ignored__gt=0)
+
+    @property
+    def rescued_hosts(self):
+        return self._get_hosts(job_host_summaries__rescued__gt=0)
+
     def notification_data(self, block=5):
         data = super(Job, self).notification_data()
         all_hosts = {}
@@ -684,7 +742,9 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
                                           failures=h.failures,
                                           ok=h.ok,
                                           processed=h.processed,
-                                          skipped=h.skipped)  # TODO: update with rescued, ignored (see https://github.com/ansible/awx/issues/4394)
+                                          skipped=h.skipped,
+                                          rescued=h.rescued,
+                                          ignored=h.ignored)
         data.update(dict(inventory=self.inventory.name if self.inventory else None,
                          project=self.project.name if self.project else None,
                          playbook=self.playbook,
@@ -707,9 +767,17 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
         return artifacts
 
     @property
+    def can_run_containerized(self):
+        return any([ig for ig in self.preferred_instance_groups if ig.is_containerized])
+
+    @property
+    def is_containerized(self):
+        return bool(self.instance_group and self.instance_group.is_containerized)
+
+    @property
     def preferred_instance_groups(self):
-        if self.project is not None and self.project.organization is not None:
-            organization_groups = [x for x in self.project.organization.instance_groups.all()]
+        if self.organization is not None:
+            organization_groups = [x for x in self.organization.instance_groups.all()]
         else:
             organization_groups = []
         if self.inventory is not None:
@@ -730,6 +798,10 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
         if self.project:
             for name in ('awx', 'tower'):
                 r['{}_project_revision'.format(name)] = self.project.scm_revision
+                r['{}_project_scm_branch'.format(name)] = self.project.scm_branch
+        if self.scm_branch:
+            for name in ('awx', 'tower'):
+                r['{}_job_scm_branch'.format(name)] = self.scm_branch
         if self.job_template:
             for name in ('awx', 'tower'):
                 r['{}_job_template_id'.format(name)] = self.job_template.pk
@@ -796,8 +868,10 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
                             continue
                         host.ansible_facts = ansible_facts
                         host.ansible_facts_modified = now()
-                        ansible_local_system_id = ansible_facts.get('ansible_local', {}).get('insights', {}).get('system_id', None)
-                        ansible_facts_system_id = ansible_facts.get('insights', {}).get('system_id', None)
+                        ansible_local = ansible_facts.get('ansible_local', {}).get('insights', {})
+                        ansible_facts = ansible_facts.get('insights', {})
+                        ansible_local_system_id = ansible_local.get('system_id', None) if isinstance(ansible_local, dict) else None
+                        ansible_facts_system_id = ansible_facts.get('system_id', None) if isinstance(ansible_facts, dict) else None
                         if ansible_local_system_id:
                             print("Setting local {}".format(ansible_local_system_id))
                             logger.debug("Insights system_id {} found for host <{}, {}> in"
@@ -829,25 +903,6 @@ class Job(UnifiedJob, JobOptions, SurveyJobMixin, JobNotificationMixin, TaskMana
                 host.save()
 
 
-# Add on aliases for the non-related-model fields
-class NullablePromptPsuedoField(object):
-    """
-    Interface for psuedo-property stored in `char_prompts` dict
-    Used in LaunchTimeConfig and submodels
-    """
-    def __init__(self, field_name):
-        self.field_name = field_name
-
-    def __get__(self, instance, type=None):
-        return instance.char_prompts.get(self.field_name, None)
-
-    def __set__(self, instance, value):
-        if value in (None, {}):
-            instance.char_prompts.pop(self.field_name, None)
-        else:
-            instance.char_prompts[self.field_name] = value
-
-
 class LaunchTimeConfigBase(BaseModel):
     '''
     Needed as separate class from LaunchTimeConfig because some models
@@ -868,6 +923,7 @@ class LaunchTimeConfigBase(BaseModel):
         null=True,
         default=None,
         on_delete=models.SET_NULL,
+        help_text=_('Inventory applied as a prompt, assuming job template prompts for inventory')
     )
     # All standard fields are stored in this dictionary field
     # This is a solution to the nullable CharField problem, specific to prompting
@@ -896,6 +952,9 @@ class LaunchTimeConfigBase(BaseModel):
                         data[prompt_name] = self.display_extra_vars()
                     else:
                         data[prompt_name] = self.extra_vars
+                    # Depending on model, field type may save and return as string
+                    if isinstance(data[prompt_name], str):
+                        data[prompt_name] = parse_yaml_or_json(data[prompt_name])
                 if self.survey_passwords and not display:
                     data['survey_passwords'] = self.survey_passwords
             else:
@@ -904,21 +963,14 @@ class LaunchTimeConfigBase(BaseModel):
                     data[prompt_name] = prompt_val
         return data
 
-    def display_extra_vars(self):
-        '''
-        Hides fields marked as passwords in survey.
-        '''
-        if self.survey_passwords:
-            extra_vars = parse_yaml_or_json(self.extra_vars).copy()
-            for key, value in self.survey_passwords.items():
-                if key in extra_vars:
-                    extra_vars[key] = value
-            return extra_vars
-        else:
-            return self.extra_vars
 
-    def display_extra_data(self):
-        return self.display_extra_vars()
+for field_name in JobTemplate.get_ask_mapping().keys():
+    if field_name == 'extra_vars':
+        continue
+    try:
+        LaunchTimeConfigBase._meta.get_field(field_name)
+    except FieldDoesNotExist:
+        setattr(LaunchTimeConfigBase, field_name, NullablePromptPseudoField(field_name))
 
 
 class LaunchTimeConfig(LaunchTimeConfigBase):
@@ -953,14 +1005,21 @@ class LaunchTimeConfig(LaunchTimeConfigBase):
     def extra_vars(self, extra_vars):
         self.extra_data = extra_vars
 
+    def display_extra_vars(self):
+        '''
+        Hides fields marked as passwords in survey.
+        '''
+        if hasattr(self, 'survey_passwords') and self.survey_passwords:
+            extra_vars = parse_yaml_or_json(self.extra_vars).copy()
+            for key, value in self.survey_passwords.items():
+                if key in extra_vars:
+                    extra_vars[key] = value
+            return extra_vars
+        else:
+            return self.extra_vars
 
-for field_name in JobTemplate.get_ask_mapping().keys():
-    if field_name == 'extra_vars':
-        continue
-    try:
-        LaunchTimeConfig._meta.get_field(field_name)
-    except FieldDoesNotExist:
-        setattr(LaunchTimeConfig, field_name, NullablePromptPsuedoField(field_name))
+    def display_extra_data(self):
+        return self.display_extra_vars()
 
 
 class JobLaunchConfig(LaunchTimeConfig):
@@ -1053,7 +1112,7 @@ class JobHostSummary(CreatedModifiedModel):
     processed = models.PositiveIntegerField(default=0, editable=False)
     rescued = models.PositiveIntegerField(default=0, editable=False)
     skipped = models.PositiveIntegerField(default=0, editable=False)
-    failed = models.BooleanField(default=False, editable=False)
+    failed = models.BooleanField(default=False, editable=False, db_index=True)
 
     def __str__(self):
         host = getattr_dne(self, 'host')
@@ -1074,21 +1133,6 @@ class JobHostSummary(CreatedModifiedModel):
         self.failed = bool(self.dark or self.failures)
         update_fields.append('failed')
         super(JobHostSummary, self).save(*args, **kwargs)
-        self.update_host_last_job_summary()
-
-    def update_host_last_job_summary(self):
-        update_fields = []
-        if self.host is None:
-            return
-        if self.host.last_job_id != self.job_id:
-            self.host.last_job_id = self.job_id
-            update_fields.append('last_job_id')
-        if self.host.last_job_host_summary_id != self.id:
-            self.host.last_job_host_summary_id = self.id
-            update_fields.append('last_job_host_summary_id')
-        if update_fields:
-            self.host.save(update_fields=update_fields)
-        #self.host.update_computed_fields()
 
 
 class SystemJobOptions(BaseModel):
@@ -1099,8 +1143,8 @@ class SystemJobOptions(BaseModel):
     SYSTEM_JOB_TYPE = [
         ('cleanup_jobs', _('Remove jobs older than a certain number of days')),
         ('cleanup_activitystream', _('Remove activity stream entries older than a certain number of days')),
-        ('clearsessions', _('Removes expired browser sessions from the database')),
-        ('cleartokens', _('Removes expired OAuth 2 access tokens and refresh tokens'))
+        ('cleanup_sessions', _('Removes expired browser sessions from the database')),
+        ('cleanup_tokens', _('Removes expired OAuth 2 access tokens and refresh tokens'))
     ]
 
     class Meta:
@@ -1125,7 +1169,7 @@ class SystemJobTemplate(UnifiedJobTemplate, SystemJobOptions):
 
     @classmethod
     def _get_unified_job_field_names(cls):
-        return ['name', 'description', 'job_type', 'extra_vars']
+        return ['name', 'description', 'organization', 'job_type', 'extra_vars']
 
     def get_absolute_url(self, request=None):
         return reverse('api:system_job_template_detail', kwargs={'pk': self.pk}, request=request)
@@ -1175,18 +1219,19 @@ class SystemJobTemplate(UnifiedJobTemplate, SystemJobOptions):
             for key in unallowed_vars:
                 rejected[key] = data.pop(key)
 
-        if 'days' in data:
-            try:
-                if type(data['days']) is bool:
-                    raise ValueError
-                if float(data['days']) != int(data['days']):
-                    raise ValueError
-                days = int(data['days'])
-                if days < 0:
-                    raise ValueError
-            except ValueError:
-                errors_list.append(_("days must be a positive integer."))
-                rejected['days'] = data.pop('days')
+        if self.job_type in ('cleanup_jobs', 'cleanup_activitystream'):
+            if 'days' in data:
+                try:
+                    if isinstance(data['days'], (bool, type(None))):
+                        raise ValueError
+                    if float(data['days']) != int(data['days']):
+                        raise ValueError
+                    days = int(data['days'])
+                    if days < 0:
+                        raise ValueError
+                except ValueError:
+                    errors_list.append(_("days must be a positive integer."))
+                    rejected['days'] = data.pop('days')
 
         if errors_list:
             errors['extra_vars'] = errors_list

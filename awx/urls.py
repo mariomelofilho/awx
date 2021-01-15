@@ -9,11 +9,12 @@ from awx.main.views import (
     handle_404,
     handle_500,
     handle_csp_violation,
+    handle_login_redirect,
 )
 
 
 urlpatterns = [
-    url(r'', include('awx.ui.urls', namespace='ui')),
+    url(r'', include('awx.ui_next.urls', namespace='ui_next')),
     url(r'^api/', include('awx.api.urls', namespace='api')),
     url(r'^sso/', include('awx.sso.urls', namespace='sso')),
     url(r'^sso/', include('social_django.urls', namespace='social')),
@@ -22,16 +23,13 @@ urlpatterns = [
     url(r'^(?:api/)?404.html$', handle_404),
     url(r'^(?:api/)?500.html$', handle_500),
     url(r'^csp-violation/', handle_csp_violation),
+    url(r'^login/', handle_login_redirect),
 ]
 
 if settings.SETTINGS_MODULE == 'awx.settings.development':
     try:
         import debug_toolbar
         urlpatterns += [
-            # for Django version 2.0
-            # path('__debug__/', include(debug_toolbar.urls)),
-
-            # TODO: this is the Django < 2.0 version, REMOVEME
             url(r'^__debug__/', include(debug_toolbar.urls))
         ]
     except ImportError:

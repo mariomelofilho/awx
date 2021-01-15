@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect } from 'react';
 import { oneOf, bool, number, string, func } from 'prop-types';
 import { Controlled as ReactCodeMirror } from 'react-codemirror2';
 import styled from 'styled-components';
@@ -6,6 +6,7 @@ import 'codemirror/mode/javascript/javascript';
 import 'codemirror/mode/yaml/yaml';
 import 'codemirror/mode/jinja2/jinja2';
 import 'codemirror/lib/codemirror.css';
+import 'codemirror/addon/display/placeholder';
 
 const LINE_HEIGHT = 24;
 const PADDING = 12;
@@ -17,7 +18,8 @@ const CodeMirror = styled(ReactCodeMirror)`
   }
 
   & > .CodeMirror {
-    height: ${props => props.rows * LINE_HEIGHT + PADDING}px;
+    height: ${props =>
+      props.fullHeight ? 'auto' : `${props.rows * LINE_HEIGHT + PADDING}px`};
     font-family: var(--pf-global--FontFamily--monospace);
   }
 
@@ -54,6 +56,17 @@ const CodeMirror = styled(ReactCodeMirror)`
       background-color: var(--pf-c-form-control--disabled--BackgroundColor);
     }
   `}
+  ${props =>
+    props.options &&
+    props.options.placeholder &&
+    `
+    .CodeMirror-empty {
+      pre.CodeMirror-placeholder {
+        color: var(--pf-c-form-control--placeholder--Color);
+        height: 100% !important;
+      }
+    }
+  `}
 `;
 
 function CodeMirrorInput({
@@ -63,8 +76,24 @@ function CodeMirrorInput({
   readOnly,
   hasErrors,
   rows,
+  fullHeight,
   className,
+  placeholder,
 }) {
+  // Workaround for CodeMirror bug: If CodeMirror renders in a modal on the
+  // modal's initial render, it appears as an empty box due to mis-calculated
+  // element height. Forcing an initial render before mounting <CodeMirror>
+  // fixes this.
+  const [isInitialized, setIsInitialized] = useState(false);
+  useEffect(() => {
+    if (!isInitialized) {
+      setIsInitialized(true);
+    }
+  }, [isInitialized]);
+  if (!isInitialized) {
+    return <div />;
+  }
+
   return (
     <CodeMirror
       className={`pf-c-form-control ${className}`}
@@ -75,24 +104,32 @@ function CodeMirrorInput({
       options={{
         smartIndent: false,
         lineNumbers: true,
+        lineWrapping: true,
+        placeholder,
         readOnly,
       }}
+      fullHeight={fullHeight}
       rows={rows}
     />
   );
 }
 CodeMirrorInput.propTypes = {
   value: string.isRequired,
-  onChange: func.isRequired,
+  onChange: func,
   mode: oneOf(['javascript', 'yaml', 'jinja2']).isRequired,
   readOnly: bool,
   hasErrors: bool,
+  fullHeight: bool,
   rows: number,
+  className: string,
 };
 CodeMirrorInput.defaultProps = {
   readOnly: false,
+  onChange: () => {},
   rows: 6,
+  fullHeight: false,
   hasErrors: false,
+  className: '',
 };
 
 export default CodeMirrorInput;

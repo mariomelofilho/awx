@@ -32,6 +32,7 @@ log = logging.getLogger(__name__)
 class Inventory(HasCopy, HasCreate, HasInstanceGroups, HasVariables, base.Base):
 
     dependencies = [Organization]
+    NATURAL_KEY = ('organization', 'name')
 
     def print_ini(self):
         """Print an ini version of the inventory"""
@@ -230,7 +231,7 @@ class InventoryScript(HasCopy, HasCreate, base.Base):
             'inventory["{0}"]["vars"] = dict(ansible_host="127.0.0.1", ansible_connection="local")',
             'print(json.dumps(inventory))'
         ])
-        group_name = re.sub(r"[\']", "", "group-{}".format(random_utf8()))
+        group_name = re.sub(r"[\']", "", "group_{}".format(random_title(non_ascii=False)))
         host_names = [
             re.sub(
                 r"[\':]",
@@ -258,6 +259,7 @@ class Group(HasCreate, HasVariables, base.Base):
 
     dependencies = [Inventory]
     optional_dependencies = [Credential, InventoryScript]
+    NATURAL_KEY = ('name', 'inventory')
 
     @property
     def is_root_group(self):
@@ -366,6 +368,7 @@ page.register_page([resources.groups,
 class Host(HasCreate, HasVariables, base.Base):
 
     dependencies = [Inventory]
+    NATURAL_KEY = ('name', 'inventory')
 
     def payload(self, inventory, **kwargs):
         payload = PseudoNamespace(
@@ -473,6 +476,7 @@ class InventorySource(HasCreate, HasNotifications, UnifiedJobTemplate):
     optional_schedule_fields = tuple()
     dependencies = [Inventory]
     optional_dependencies = [Credential, InventoryScript, Project]
+    NATURAL_KEY = ('organization', 'name', 'inventory')
 
     def payload(
             self,
@@ -497,10 +501,7 @@ class InventorySource(HasCreate, HasNotifications, UnifiedJobTemplate):
             payload.source_project = project.id
 
         optional_fields = (
-            'group_by',
-            'instance_filters',
             'source_path',
-            'source_regions',
             'source_vars',
             'timeout',
             'overwrite',
@@ -682,3 +683,11 @@ class InventoryUpdateCancel(base.Base):
 
 
 page.register_page(resources.inventory_update_cancel, InventoryUpdateCancel)
+
+
+class InventoryCopy(base.Base):
+
+    pass
+
+
+page.register_page(resources.inventory_copy, InventoryCopy)

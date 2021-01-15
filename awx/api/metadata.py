@@ -2,6 +2,7 @@
 # All Rights Reserved.
 
 from collections import OrderedDict
+from uuid import UUID
 
 # Django
 from django.core.exceptions import PermissionDenied
@@ -20,8 +21,10 @@ from rest_framework.fields import JSONField as DRFJSONField
 from rest_framework.request import clone_request
 
 # AWX
-from awx.main.fields import JSONField
-from awx.main.models import InventorySource, NotificationTemplate
+from awx.api.fields import ChoiceNullField
+from awx.main.fields import JSONField, ImplicitRoleField
+from awx.main.models import NotificationTemplate
+from awx.main.scheduler.kubernetes import PodManager
 
 
 class Metadata(metadata.SimpleMetadata):
@@ -36,7 +39,7 @@ class Metadata(metadata.SimpleMetadata):
             'min_length', 'max_length',
             'min_value', 'max_value',
             'category', 'category_slug',
-            'defined_in_file'
+            'defined_in_file', 'unit',
         ]
 
         for attr in text_attrs:
@@ -58,7 +61,8 @@ class Metadata(metadata.SimpleMetadata):
                 'type': _('Data type for this {}.'),
                 'url': _('URL for this {}.'),
                 'related': _('Data structure with URLs of related resources.'),
-                'summary_fields': _('Data structure with name/description for related resources.'),
+                'summary_fields': _('Data structure with name/description for related resources.  '
+                                    'The output for some objects may be limited for performance reasons.'),
                 'created': _('Timestamp when this {} was created.'),
                 'modified': _('Timestamp when this {} was last modified.'),
             }
@@ -83,6 +87,8 @@ class Metadata(metadata.SimpleMetadata):
         # FIXME: Still isn't showing all default values?
         try:
             default = field.get_default()
+            if type(default) is UUID:
+                default = 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx'
             if field.field_name == 'TOWER_URL_BASE' and default == 'https://towerhost':
                 default = '{}://{}'.format(self.request.scheme, self.request.get_host())
             field_info['default'] = default
@@ -95,24 +101,19 @@ class Metadata(metadata.SimpleMetadata):
             field_info['children'] = self.get_serializer_info(field)
 
         if not isinstance(field, (RelatedField, ManyRelatedField)) and hasattr(field, 'choices'):
-            field_info['choices'] = [(choice_value, choice_name) for choice_value, choice_name in field.choices.items()]
+            choices = [
+                (choice_value, choice_name) for choice_value, choice_name in field.choices.items()
+            ]
+            if not any(choice in ('', None) for choice, _ in choices):
+                if field.allow_blank:
+                    choices = [("", "---------")] + choices
+                if field.allow_null and not isinstance(field, ChoiceNullField):
+                    choices = [(None, "---------")] + choices
+            field_info['choices'] = choices
 
         # Indicate if a field is write-only.
         if getattr(field, 'write_only', False):
             field_info['write_only'] = True
-
-        # Special handling of inventory source_region choices that vary based on
-        # selected inventory source.
-        if field.field_name == 'source_regions':
-            for cp in ('azure_rm', 'ec2', 'gce'):
-                get_regions = getattr(InventorySource, 'get_%s_region_choices' % cp)
-                field_info['%s_region_choices' % cp] = get_regions()
-
-        # Special handling of group_by choices for EC2.
-        if field.field_name == 'group_by':
-            for cp in ('ec2',):
-                get_group_by_choices = getattr(InventorySource, 'get_%s_group_by_choices' % cp)
-                field_info['%s_group_by_choices' % cp] = get_group_by_choices()
 
         # Special handling of notification configuration where the required properties
         # are conditional on the type selected.
@@ -157,9 +158,16 @@ class Metadata(metadata.SimpleMetadata):
             isinstance(field, JSONField) or
             isinstance(model_field, JSONField) or
             isinstance(field, DRFJSONField) or
-            isinstance(getattr(field, 'model_field', None), JSONField)
+            isinstance(getattr(field, 'model_field', None), JSONField) or
+            field.field_name == 'credential_passwords'
         ):
             field_info['type'] = 'json'
+        elif (
+            isinstance(field, ManyRelatedField) and
+            field.field_name == 'credentials'
+            # launch-time credentials
+        ):
+            field_info['type'] = 'list_of_ids'
         elif isinstance(model_field, BooleanField):
             field_info['type'] = 'boolean'
 
@@ -199,6 +207,9 @@ class Metadata(metadata.SimpleMetadata):
             for field, meta in list(actions[method].items()):
                 if not isinstance(meta, dict):
                     continue
+
+                if field == "pod_spec_override":
+                    meta['default'] = PodManager().pod_definition
 
                 # Add type choices if available from the serializer.
                 if field == 'type' and hasattr(serializer, 'get_type_choices'):
@@ -251,6 +262,16 @@ class Metadata(metadata.SimpleMetadata):
         # Add related search fields if available from the view.
         if getattr(view, 'related_search_fields', None):
             metadata['related_search_fields'] = view.related_search_fields
+
+        # include role names in metadata
+        roles = []
+        model = getattr(view, 'model', None)
+        if model:
+            for field in model._meta.get_fields():
+                if type(field) is ImplicitRoleField:
+                    roles.append(field.name)
+        if len(roles) > 0:
+            metadata['object_roles'] = roles
 
         from rest_framework import generics
         if isinstance(view, generics.ListAPIView) and hasattr(view, 'paginator'):

@@ -1,16 +1,16 @@
 # Python
-import json
 import logging
-import os
 
 # Django
 from django.utils.translation import ugettext_lazy as _
 
 # Django REST Framework
 from rest_framework import serializers
+from rest_framework.fields import FloatField
 
 # Tower
 from awx.conf import fields, register, register_validate
+
 
 logger = logging.getLogger('awx.main.conf')
 
@@ -53,15 +53,6 @@ register(
 )
 
 register(
-    'TOWER_ADMIN_ALERTS',
-    field_class=fields.BooleanField,
-    label=_('Enable Administrator Alerts'),
-    help_text=_('Email Admin users for system events that may require attention.'),
-    category=_('System'),
-    category_slug='system',
-)
-
-register(
     'TOWER_URL_BASE',
     field_class=fields.URLField,
     schemes=('http', 'https'),
@@ -87,11 +78,11 @@ register(
 )
 
 register(
-    'PROXY_IP_WHITELIST',
+    'PROXY_IP_ALLOWED_LIST',
     field_class=fields.StringListField,
-    label=_('Proxy IP Whitelist'),
+    label=_('Proxy IP Allowed List'),
     help_text=_("If Tower is behind a reverse proxy/load balancer, use this setting "
-                "to whitelist the proxy IP addresses from which Tower should trust "
+                "to configure the proxy IP addresses from which Tower should trust "
                 "custom REMOTE_HOST_HEADERS header values. "
                 "If this setting is an empty list (the default), the headers specified by "
                 "REMOTE_HOST_HEADERS will be trusted unconditionally')"),
@@ -100,22 +91,10 @@ register(
 )
 
 
-def _load_default_license_from_file():
-    try:
-        license_file = os.environ.get('AWX_LICENSE_FILE', '/etc/tower/license')
-        if os.path.exists(license_file):
-            license_data = json.load(open(license_file))
-            logger.debug('Read license data from "%s".', license_file)
-            return license_data
-    except Exception:
-        logger.warning('Could not read license from "%s".', license_file, exc_info=True)
-    return {}
-
-
 register(
     'LICENSE',
     field_class=fields.DictField,
-    default=_load_default_license_from_file,
+    default=lambda: {},
     label=_('License'),
     help_text=_('The license controls which features and functionality are '
                 'enabled. Use /api/v2/config/ to update or change '
@@ -132,7 +111,7 @@ register(
     encrypted=False,
     read_only=False,
     label=_('Red Hat customer username'),
-    help_text=_('This username is used to retrieve license information and to send Automation Analytics'),  # noqa
+    help_text=_('This username is used to send data to Automation Analytics'),
     category=_('System'),
     category_slug='system',
 )
@@ -145,7 +124,33 @@ register(
     encrypted=True,
     read_only=False,
     label=_('Red Hat customer password'),
-    help_text=_('This password is used to retrieve license information and to send Automation Analytics'),  # noqa
+    help_text=_('This password is used to send data to Automation Analytics'),
+    category=_('System'),
+    category_slug='system',
+)
+
+register(
+    'SUBSCRIPTIONS_USERNAME',
+    field_class=fields.CharField,
+    default='',
+    allow_blank=True,
+    encrypted=False,
+    read_only=False,
+    label=_('Red Hat or Satellite username'),
+    help_text=_('This username is used to retrieve subscription and content information'),  # noqa
+    category=_('System'),
+    category_slug='system',
+)
+
+register(
+    'SUBSCRIPTIONS_PASSWORD',
+    field_class=fields.CharField,
+    default='',
+    allow_blank=True,
+    encrypted=True,
+    read_only=False,
+    label=_('Red Hat or Satellite password'),
+    help_text=_('This password is used to retrieve subscription and content information'),  # noqa
     category=_('System'),
     category_slug='system',
 )
@@ -153,10 +158,10 @@ register(
 register(
     'AUTOMATION_ANALYTICS_URL',
     field_class=fields.URLField,
-    default='https://cloud.redhat.com',
+    default='https://example.com',
     schemes=('http', 'https'),
     allow_plain_hostname=True,  # Allow hostname only without TLD.
-    label=_('Automation Analytics upload URL.'),
+    label=_('Automation Analytics upload URL'),
     help_text=_('This setting is used to to configure data collection for the Automation Analytics dashboard'),
     category=_('System'),
     category_slug='system',
@@ -248,21 +253,9 @@ register(
     field_class=fields.StringListField,
     required=False,
     label=_('Paths to expose to isolated jobs'),
-    help_text=_('Whitelist of paths that would otherwise be hidden to expose to isolated jobs. Enter one path per line.'),
+    help_text=_('List of paths that would otherwise be hidden to expose to isolated jobs. Enter one path per line.'),
     category=_('Jobs'),
     category_slug='jobs',
-)
-
-register(
-    'AWX_ISOLATED_VERBOSITY',
-    field_class=fields.IntegerField,
-    min_value=0,
-    max_value=5,
-    label=_('Verbosity level for isolated node management tasks'),
-    help_text=_('This can be raised to aid in debugging connection issues for isolated task execution'),
-    category=_('Jobs'),
-    category_slug='jobs',
-    default=0
 )
 
 register(
@@ -273,6 +266,7 @@ register(
     help_text=_('The number of seconds to sleep between status checks for jobs running on isolated instances.'),
     category=_('Jobs'),
     category_slug='jobs',
+    unit=_('seconds'),
 )
 
 register(
@@ -284,6 +278,7 @@ register(
                 'This includes the time needed to copy source control files (playbooks) to the isolated instance.'),
     category=_('Jobs'),
     category_slug='jobs',
+    unit=_('seconds'),
 )
 
 register(
@@ -296,6 +291,17 @@ register(
                 'Value should be substantially greater than expected network latency.'),
     category=_('Jobs'),
     category_slug='jobs',
+    unit=_('seconds'),
+)
+
+register(
+    'AWX_ISOLATED_HOST_KEY_CHECKING',
+    field_class=fields.BooleanField,
+    label=_('Isolated host key checking'),
+    help_text=_('When set to True, AWX will enforce strict host key checking for communication with isolated nodes.'),
+    category=_('Jobs'),
+    category_slug='jobs',
+    default=False
 )
 
 register(
@@ -336,6 +342,53 @@ register(
 )
 
 register(
+    'AWX_RESOURCE_PROFILING_ENABLED',
+    field_class=fields.BooleanField,
+    default=False,
+    label=_('Enable detailed resource profiling on all playbook runs'),
+    help_text=_('If set, detailed resource profiling data will be collected on all jobs. '
+                'This data can be gathered with `sosreport`.'),  # noqa
+    category=_('Jobs'),
+    category_slug='jobs',
+)
+
+register(
+    'AWX_RESOURCE_PROFILING_CPU_POLL_INTERVAL',
+    field_class=FloatField,
+    default='0.25',
+    label=_('Interval (in seconds) between polls for cpu usage.'),
+    help_text=_('Interval (in seconds) between polls for cpu usage. '
+                'Setting this lower than the default will affect playbook performance.'),
+    category=_('Jobs'),
+    category_slug='jobs',
+    required=False,
+)
+
+register(
+    'AWX_RESOURCE_PROFILING_MEMORY_POLL_INTERVAL',
+    field_class=FloatField,
+    default='0.25',
+    label=_('Interval (in seconds) between polls for memory usage.'),
+    help_text=_('Interval (in seconds) between polls for memory usage. '
+                'Setting this lower than the default will affect playbook performance.'),
+    category=_('Jobs'),
+    category_slug='jobs',
+    required=False,
+)
+
+register(
+    'AWX_RESOURCE_PROFILING_PID_POLL_INTERVAL',
+    field_class=FloatField,
+    default='0.25',
+    label=_('Interval (in seconds) between polls for PID count.'),
+    help_text=_('Interval (in seconds) between polls for PID count. '
+                'Setting this lower than the default will affect playbook performance.'),
+    category=_('Jobs'),
+    category_slug='jobs',
+    required=False,
+)
+
+register(
     'AWX_TASK_ENV',
     field_class=fields.KeyValueField,
     default={},
@@ -350,10 +403,19 @@ register(
     'INSIGHTS_TRACKING_STATE',
     field_class=fields.BooleanField,
     default=False,
-    label=_('Gather data for Automation Insights'),
-    help_text=_('Enables Tower to gather data on automation and send it to Red Hat Insights.'),
+    label=_('Gather data for Automation Analytics'),
+    help_text=_('Enables Tower to gather data on automation and send it to Red Hat.'),
     category=_('System'),
     category_slug='system',
+)
+
+register(
+    'PROJECT_UPDATE_VVV',
+    field_class=fields.BooleanField,
+    label=_('Run Project Updates With Higher Verbosity'),
+    help_text=_('Adds the CLI -vvv flag to ansible-playbook runs of project_update.yml used for project updates.'),
+    category=_('Jobs'),
+    category_slug='jobs',
 )
 
 register(
@@ -374,6 +436,30 @@ register(
     help_text=_('Allows collections to be dynamically downloaded from a requirements.yml file for SCM projects.'),
     category=_('Jobs'),
     category_slug='jobs',
+)
+
+register(
+    'AWX_SHOW_PLAYBOOK_LINKS',
+    field_class=fields.BooleanField,
+    default=False,
+    label=_('Follow symlinks'),
+    help_text=_(
+        'Follow symbolic links when scanning for playbooks. Be aware that setting this to True can lead '
+        'to infinite recursion if a link points to a parent directory of itself.'
+    ),
+    category=_('Jobs'),
+    category_slug='jobs',
+)
+
+register(
+    'GALAXY_IGNORE_CERTS',
+    field_class=fields.BooleanField,
+    default=False,
+    label=_('Ignore Ansible Galaxy SSL Certificate Verification'),
+    help_text=_('If set to true, certificate validation will not be done when '
+                'installing content from any Galaxy server.'),
+    category=_('Jobs'),
+    category_slug='jobs'
 )
 
 register(
@@ -427,6 +513,7 @@ register(
                 'timeout should be imposed. A timeout set on an individual job template will override this.'),
     category=_('Jobs'),
     category_slug='jobs',
+    unit=_('seconds'),
 )
 
 register(
@@ -439,6 +526,7 @@ register(
                 'timeout should be imposed. A timeout set on an individual inventory source will override this.'),
     category=_('Jobs'),
     category_slug='jobs',
+    unit=_('seconds'),
 )
 
 register(
@@ -451,6 +539,7 @@ register(
                 'timeout should be imposed. A timeout set on an individual project will override this.'),
     category=_('Jobs'),
     category_slug='jobs',
+    unit=_('seconds'),
 )
 
 register(
@@ -463,6 +552,19 @@ register(
                 'the last time they were modified. Only valid, non-stale, facts will be accessible by '
                 'a playbook. Note, this does not influence the deletion of ansible_facts from the database. '
                 'Use a value of 0 to indicate that no timeout should be imposed.'),
+    category=_('Jobs'),
+    category_slug='jobs',
+    unit=_('seconds'),
+)
+
+register(
+    'MAX_FORKS',
+    field_class=fields.IntegerField,
+    allow_null=False,
+    default=200,
+    label=_('Maximum number of forks per job'),
+    help_text=_('Saving a Job Template with more than this number of forks will result in an error. '
+                'When set to 0, no limit is applied.'),
     category=_('Jobs'),
     category_slug='jobs',
 )
@@ -506,7 +608,7 @@ register(
     allow_blank=True,
     default='',
     label=_('Logging Aggregator Username'),
-    help_text=_('Username for external log aggregator (if required).'),
+    help_text=_('Username for external log aggregator (if required; HTTP/s only).'),
     category=_('Logging'),
     category_slug='logging',
     required=False,
@@ -518,7 +620,7 @@ register(
     default='',
     encrypted=True,
     label=_('Logging Aggregator Password/Token'),
-    help_text=_('Password or authentication token for external log aggregator (if required).'),
+    help_text=_('Password or authentication token for external log aggregator (if required; HTTP/s only).'),
     category=_('Logging'),
     category_slug='logging',
     required=False,
@@ -590,6 +692,7 @@ register(
                 'aggregator protocols.'),
     category=_('Logging'),
     category_slug='logging',
+    unit=_('seconds'),
 )
 register(
     'LOG_AGGREGATOR_VERIFY_CERT',
@@ -616,15 +719,62 @@ register(
     category=_('Logging'),
     category_slug='logging',
 )
+register(
+    'LOG_AGGREGATOR_MAX_DISK_USAGE_GB',
+    field_class=fields.IntegerField,
+    default=1,
+    min_value=1,
+    label=_('Maximum disk persistance for external log aggregation (in GB)'),
+    help_text=_('Amount of data to store (in gigabytes) during an outage of '
+                'the external log aggregator (defaults to 1). '
+                'Equivalent to the rsyslogd queue.maxdiskspace setting.'),
+    category=_('Logging'),
+    category_slug='logging',
+)
+register(
+    'LOG_AGGREGATOR_MAX_DISK_USAGE_PATH',
+    field_class=fields.CharField,
+    default='/var/lib/awx',
+    label=_('File system location for rsyslogd disk persistence'),
+    help_text=_('Location to persist logs that should be retried after an outage '
+                'of the external log aggregator (defaults to /var/lib/awx). '
+                'Equivalent to the rsyslogd queue.spoolDirectory setting.'),
+    category=_('Logging'),
+    category_slug='logging',
+)
+register(
+    'LOG_AGGREGATOR_RSYSLOGD_DEBUG',
+    field_class=fields.BooleanField,
+    default=False,
+    label=_('Enable rsyslogd debugging'),
+    help_text=_('Enabled high verbosity debugging for rsyslogd.  '
+                'Useful for debugging connection issues for external log aggregation.'),
+    category=_('Logging'),
+    category_slug='logging',
+)
+
 
 
 register(
-    'BROKER_DURABILITY',
-    field_class=fields.BooleanField,
-    label=_('Message Durability'),
-    help_text=_('When set (the default), underlying queues will be persisted to disk.  Disable this to enable higher message bus throughput.'),
+    'AUTOMATION_ANALYTICS_LAST_GATHER',
+    field_class=fields.DateTimeField,
+    label=_('Last gather date for Automation Analytics.'),
+    allow_null=True,
+    category=_('System'),
+    category_slug='system'
+)
+
+
+register(
+    'AUTOMATION_ANALYTICS_GATHER_INTERVAL',
+    field_class=fields.IntegerField,
+    label=_('Automation Analytics Gather Interval'),
+    help_text=_('Interval (in seconds) between data gathering.'),
+    default=14400,	# every 4 hours
+    min_value=1800,	# every 30 minutes
     category=_('System'),
     category_slug='system',
+    unit=_('seconds'),
 )
 
 

@@ -52,9 +52,9 @@ class ProjectOptions(models.Model):
     SCM_TYPE_CHOICES = [
         ('', _('Manual')),
         ('git', _('Git')),
-        ('hg', _('Mercurial')),
         ('svn', _('Subversion')),
         ('insights', _('Red Hat Insights')),
+        ('archive', _('Remote Archive')),
     ]
 
     class Meta:
@@ -194,12 +194,17 @@ class ProjectOptions(models.Model):
             if not check_if_exists or os.path.exists(smart_str(proj_path)):
                 return proj_path
 
+    def get_cache_path(self):
+        local_path = os.path.basename(self.local_path)
+        if local_path:
+            return os.path.join(settings.PROJECTS_ROOT, '.__awx_cache', local_path)
+
     @property
     def playbooks(self):
         results = []
         project_path = self.get_project_path()
         if project_path:
-            for dirpath, dirnames, filenames in os.walk(smart_str(project_path)):
+            for dirpath, dirnames, filenames in os.walk(smart_str(project_path), followlinks=settings.AWX_SHOW_PLAYBOOK_LINKS):
                 if skip_directory(dirpath):
                     continue
                 for filename in filenames:
@@ -254,13 +259,6 @@ class Project(UnifiedJobTemplate, ProjectOptions, ResourceMixin, CustomVirtualEn
         app_label = 'main'
         ordering = ('id',)
 
-    organization = models.ForeignKey(
-        'Organization',
-        blank=True,
-        null=True,
-        on_delete=models.CASCADE,
-        related_name='projects',
-    )
     scm_update_on_launch = models.BooleanField(
         default=False,
         help_text=_('Update the project when a job is launched that uses the project.'),
@@ -329,8 +327,15 @@ class Project(UnifiedJobTemplate, ProjectOptions, ResourceMixin, CustomVirtualEn
     @classmethod
     def _get_unified_job_field_names(cls):
         return set(f.name for f in ProjectOptions._meta.fields) | set(
-            ['name', 'description', 'schedule']
+            ['name', 'description', 'organization']
         )
+
+    def clean_organization(self):
+        if self.pk:
+            old_org_id = getattr(self, '_prior_values_store', {}).get('organization_id', None)
+            if self.organization_id != old_org_id and self.jobtemplates.exists():
+                raise ValidationError({'organization': _('Organization cannot be changed when in use by job templates.')})
+        return self.organization
 
     def save(self, *args, **kwargs):
         new_instance = not bool(self.pk)
@@ -419,6 +424,10 @@ class Project(UnifiedJobTemplate, ProjectOptions, ResourceMixin, CustomVirtualEn
         return False
 
     @property
+    def cache_id(self):
+        return str(self.last_job_id)
+
+    @property
     def notification_templates(self):
         base_notification_templates = NotificationTemplate.objects
         error_notification_templates = list(base_notification_templates
@@ -450,16 +459,17 @@ class Project(UnifiedJobTemplate, ProjectOptions, ResourceMixin, CustomVirtualEn
     '''
     def _get_related_jobs(self):
         return UnifiedJob.objects.non_polymorphic().filter(
-            models.Q(Job___project=self) |
-            models.Q(ProjectUpdate___project=self)
+            models.Q(job__project=self) |
+            models.Q(projectupdate__project=self)
         )
 
     def delete(self, *args, **kwargs):
-        path_to_delete = self.get_project_path(check_if_exists=False)
+        paths_to_delete = (self.get_project_path(check_if_exists=False), self.get_cache_path())
         r = super(Project, self).delete(*args, **kwargs)
-        if self.scm_type and path_to_delete:  # non-manual, concrete path
-            from awx.main.tasks import delete_project_files
-            delete_project_files.delay(path_to_delete)
+        for path_to_delete in paths_to_delete:
+            if self.scm_type and path_to_delete:  # non-manual, concrete path
+                from awx.main.tasks import delete_project_files
+                delete_project_files.delay(path_to_delete)
         return r
 
 
@@ -482,6 +492,12 @@ class ProjectUpdate(UnifiedJob, ProjectOptions, JobNotificationMixin, TaskManage
         max_length=64,
         choices=PROJECT_UPDATE_JOB_TYPE_CHOICES,
         default='check',
+    )
+    job_tags = models.CharField(
+        max_length=1024,
+        blank=True,
+        default='',
+        help_text=_('Parts of the project update playbook that will be run.'),
     )
     scm_revision = models.CharField(
         max_length=1024,
@@ -548,6 +564,19 @@ class ProjectUpdate(UnifiedJob, ProjectOptions, JobNotificationMixin, TaskManage
     def result_stdout_raw(self):
         return self._result_stdout_raw(redact_sensitive=True)
 
+    @property
+    def branch_override(self):
+        """Whether a branch other than the project default is used."""
+        if not self.project:
+            return True
+        return bool(self.scm_branch and self.scm_branch != self.project.scm_branch)
+
+    @property
+    def cache_id(self):
+        if self.branch_override or self.job_type == 'check' or (not self.project):
+            return str(self.id)
+        return self.project.cache_id
+
     def result_stdout_raw_limited(self, start_line=0, end_line=None, redact_sensitive=True):
         return self._result_stdout_raw_limited(start_line, end_line, redact_sensitive=redact_sensitive)
 
@@ -578,8 +607,8 @@ class ProjectUpdate(UnifiedJob, ProjectOptions, JobNotificationMixin, TaskManage
 
     @property
     def preferred_instance_groups(self):
-        if self.project is not None and self.project.organization is not None:
-            organization_groups = [x for x in self.project.organization.instance_groups.all()]
+        if self.organization is not None:
+            organization_groups = [x for x in self.organization.instance_groups.all()]
         else:
             organization_groups = []
         template_groups = [x for x in super(ProjectUpdate, self).preferred_instance_groups]
@@ -587,3 +616,21 @@ class ProjectUpdate(UnifiedJob, ProjectOptions, JobNotificationMixin, TaskManage
         if not selected_groups:
             return self.global_instance_groups
         return selected_groups
+
+    def save(self, *args, **kwargs):
+        added_update_fields = []
+        if not self.job_tags:
+            job_tags = ['update_{}'.format(self.scm_type), 'install_roles', 'install_collections']
+            self.job_tags = ','.join(job_tags)
+            added_update_fields.append('job_tags')
+        if self.scm_delete_on_update and 'delete' not in self.job_tags and self.job_type == 'check':
+            self.job_tags = ','.join([self.job_tags, 'delete'])
+            added_update_fields.append('job_tags')
+        elif (not self.scm_delete_on_update) and 'delete' in self.job_tags:
+            job_tags = self.job_tags.split(',')
+            job_tags.remove('delete')
+            self.job_tags = ','.join(job_tags)
+            added_update_fields.append('job_tags')
+        if 'update_fields' in kwargs:
+            kwargs['update_fields'].extend(added_update_fields)
+        return super(ProjectUpdate, self).save(*args, **kwargs)

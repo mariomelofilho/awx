@@ -70,11 +70,15 @@ class InventoryUpdateEventsList(SubListAPIView):
 
 class InventoryScriptList(ListCreateAPIView):
 
+    deprecated = True
+
     model = CustomInventoryScript
     serializer_class = CustomInventoryScriptSerializer
 
 
 class InventoryScriptDetail(RetrieveUpdateDestroyAPIView):
+
+    deprecated = True
 
     model = CustomInventoryScript
     serializer_class = CustomInventoryScriptSerializer
@@ -92,6 +96,8 @@ class InventoryScriptDetail(RetrieveUpdateDestroyAPIView):
 
 class InventoryScriptObjectRolesList(SubListAPIView):
 
+    deprecated = True
+
     model = Role
     serializer_class = RoleSerializer
     parent_model = CustomInventoryScript
@@ -104,6 +110,8 @@ class InventoryScriptObjectRolesList(SubListAPIView):
 
 
 class InventoryScriptCopy(CopyAPIView):
+
+    deprecated = True
 
     model = CustomInventoryScript
     copy_return_serializer_class = CustomInventoryScriptSerializer
@@ -126,7 +134,8 @@ class InventoryDetail(RelatedJobsPreventDeleteMixin, ControlledByScmMixin, Retri
 
         # Do not allow changes to an Inventory kind.
         if kind is not None and obj.kind != kind:
-            return self.http_method_not_allowed(request, *args, **kwargs)
+            return Response(dict(error=_('You cannot turn a regular inventory into a "smart" inventory.')),
+                            status=status.HTTP_405_METHOD_NOT_ALLOWED)
         return super(InventoryDetail, self).update(request, *args, **kwargs)
 
     def destroy(self, request, *args, **kwargs):

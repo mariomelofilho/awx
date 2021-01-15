@@ -12,6 +12,11 @@ const itemB = {
   name: 'Foo',
   summary_fields: { user_capabilities: { delete: false } },
 };
+const itemC = {
+  id: 1,
+  username: 'Foo',
+  summary_fields: { user_capabilities: { delete: false } },
+};
 
 describe('<ToolbarDeleteButton />', () => {
   test('should render button', () => {
@@ -26,8 +31,8 @@ describe('<ToolbarDeleteButton />', () => {
     const wrapper = mountWithContexts(
       <ToolbarDeleteButton onDelete={() => {}} itemsToDelete={[itemA]} />
     );
+    expect(wrapper.find('Modal')).toHaveLength(0);
     wrapper.find('button').simulate('click');
-    expect(wrapper.find('ToolbarDeleteButton').state('isModalOpen')).toBe(true);
     wrapper.update();
     expect(wrapper.find('Modal')).toHaveLength(1);
   });
@@ -37,13 +42,14 @@ describe('<ToolbarDeleteButton />', () => {
     const wrapper = mountWithContexts(
       <ToolbarDeleteButton onDelete={onDelete} itemsToDelete={[itemA]} />
     );
-    wrapper.find('ToolbarDeleteButton').setState({ isModalOpen: true });
+    wrapper.find('button').simulate('click');
     wrapper.update();
-    wrapper.find('button.pf-m-danger').simulate('click');
+    wrapper
+      .find('ModalBoxFooter button[aria-label="confirm delete"]')
+      .simulate('click');
+    wrapper.update();
     expect(onDelete).toHaveBeenCalled();
-    expect(wrapper.find('ToolbarDeleteButton').state('isModalOpen')).toBe(
-      false
-    );
+    expect(wrapper.find('Modal')).toHaveLength(0);
   });
 
   test('should disable button when no delete permissions', () => {
@@ -59,5 +65,15 @@ describe('<ToolbarDeleteButton />', () => {
     );
     expect(wrapper.find('Tooltip')).toHaveLength(1);
     expect(wrapper.find('Tooltip').prop('content')).toEqual('Delete');
+  });
+
+  test('should render tooltip for username', () => {
+    const wrapper = mountWithContexts(
+      <ToolbarDeleteButton onDelete={() => {}} itemsToDelete={[itemC]} />
+    );
+    expect(wrapper.find('Tooltip')).toHaveLength(1);
+    expect(wrapper.find('Tooltip').prop('content').props.children).toEqual(
+      'You do not have permission to delete Items: Foo'
+    );
   });
 });

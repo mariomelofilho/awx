@@ -1,5 +1,6 @@
 import React from 'react';
-import { mountWithContexts } from '@testUtils/enzymeHelpers';
+import { act } from 'react-dom/test-utils';
+import { mountWithContexts } from '../../../testUtils/enzymeHelpers';
 
 import ErrorDetail from './ErrorDetail';
 
@@ -20,5 +21,26 @@ describe('ErrorDetail', () => {
       />
     );
     expect(wrapper).toHaveLength(1);
+  });
+  test('testing errors', () => {
+    const wrapper = mountWithContexts(
+      <ErrorDetail
+        error={
+          new Error({
+            response: {
+              config: {
+                method: 'patch',
+              },
+              data: {
+                project: ['project error'],
+                inventory: ['inventory error'],
+              },
+            },
+          })
+        }
+      />
+    );
+    act(() => wrapper.find('ExpandableSection').prop('onToggle')());
+    wrapper.update();
   });
 });

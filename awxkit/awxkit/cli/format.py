@@ -2,7 +2,6 @@ import locale
 import json
 from distutils.util import strtobool
 
-import six
 import yaml
 
 from awxkit.cli.utils import colored
@@ -17,7 +16,7 @@ def add_authentication_arguments(parser, env):
     )
     auth.add_argument(
         '--conf.token',
-        default=env.get('TOWER_TOKEN', ''),
+        default=env.get('TOWER_OAUTH_TOKEN', env.get('TOWER_TOKEN', '')),
         help='an OAuth2.0 token (get one by using `awx login`)',
         metavar='TEXT',
     )
@@ -41,7 +40,7 @@ def add_authentication_arguments(parser, env):
 
 
 def add_output_formatting_arguments(parser, env):
-    formatting = parser.add_argument_group('output formatting')
+    formatting = parser.add_argument_group('input/output formatting')
 
     formatting.add_argument(
         '-f',
@@ -50,7 +49,7 @@ def add_output_formatting_arguments(parser, env):
         choices=FORMATTERS.keys(),
         default=env.get('TOWER_FORMAT', 'json'),
         help=(
-            'specify an output format'
+            'specify a format for the input and output'
         ),
     )
     formatting.add_argument(
@@ -81,7 +80,7 @@ def add_output_formatting_arguments(parser, env):
 def format_response(response, fmt='json', filter='.', changed=False):
     if response is None:
         return  # HTTP 204
-    if isinstance(response, six.text_type):
+    if isinstance(response, str):
         return response
 
     if 'results' in response.__dict__:
@@ -115,7 +114,7 @@ def format_jq(output, fmt):
     results = []
     for x in jq.jq(fmt).transform(output, multiple_output=True):
         if x not in (None, ''):
-            if isinstance(x, six.text_type):
+            if isinstance(x, str):
                 results.append(x)
             else:
                 results.append(json.dumps(x))
@@ -131,7 +130,6 @@ def format_yaml(output, fmt):
     return yaml.safe_dump(
         output,
         default_flow_style=False,
-        encoding='utf-8',
         allow_unicode=True
     )
 
@@ -163,8 +161,10 @@ def format_human(output, fmt):
         try:
             return locale.format("%.*f", (0, int(v)), True)
         except (ValueError, TypeError):
-            if not isinstance(v, six.text_type):
-                return str(v)
+            if isinstance(v, (list, dict)):
+                return json.dumps(v)
+            if v is None:
+                return ''
             return v
 
     # calculate the max width of each column

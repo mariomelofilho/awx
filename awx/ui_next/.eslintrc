@@ -8,13 +8,9 @@
       "modules": true
     }
   },
-  "extends": ["airbnb", "prettier", "prettier/react"],
+  "plugins": ["react-hooks", "jsx-a11y"],
+  "extends": ["airbnb", "prettier", "prettier/react", "plugin:jsx-a11y/strict"],
   "settings": {
-    "import/resolver": {
-      "webpack": {
-        "config": "webpack.config.js"
-      }
-    },
     "react": {
       "version": "16.5.2"
     }
@@ -31,7 +27,7 @@
     "camelcase": "off",
     "arrow-parens": "off",
     "comma-dangle": "off",
-    "//": "https://github.com/benmosher/eslint-plugin-import/issues/479#issuecomment-252500896",
+    // https://github.com/benmosher/eslint-plugin-import/issues/479#issuecomment-252500896
     "import/no-extraneous-dependencies": "off",
     "max-len": [
       "error",
@@ -56,6 +52,8 @@
     "react/prop-types": "off",
     "react/sort-comp": ["error", {}],
     "jsx-a11y/label-has-for": "off",
-    "jsx-a11y/label-has-associated-control": "off"
+    "jsx-a11y/label-has-associated-control": "off",
+    "react-hooks/rules-of-hooks": "error",
+    "react-hooks/exhaustive-deps": "warn"
   }
 }

@@ -1,16 +1,19 @@
 import argparse
 import json
 import unittest
-try:
-    from StringIO import StringIO
-except ImportError:
-    from io import StringIO
+from io import StringIO
 
 import pytest
 from requests import Response
 
 from awxkit.api.pages import Page
 from awxkit.cli.options import ResourceOptionsParser
+
+
+class ResourceOptionsParser(ResourceOptionsParser):
+
+    def get_allowed_options(self):
+        self.allowed_options = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE']
 
 
 class OptionsPage(Page):
@@ -42,7 +45,7 @@ class TestOptions(unittest.TestCase):
                 'POST': {},
             }
         })
-        ResourceOptionsParser(page, 'users', self.parser)
+        ResourceOptionsParser(None, page, 'users', self.parser)
         assert 'list' in self.parser.choices
 
     def test_list_filtering(self):
@@ -54,7 +57,7 @@ class TestOptions(unittest.TestCase):
                 },
             }
         })
-        options = ResourceOptionsParser(page, 'users', self.parser)
+        options = ResourceOptionsParser(None, page, 'users', self.parser)
         options.build_query_arguments('list', 'POST')
         assert 'list' in self.parser.choices
 
@@ -71,7 +74,7 @@ class TestOptions(unittest.TestCase):
                 },
             }
         })
-        options = ResourceOptionsParser(page, 'users', self.parser)
+        options = ResourceOptionsParser(None, page, 'users', self.parser)
         options.build_query_arguments('list', 'POST')
         assert 'list' in self.parser.choices
 
@@ -90,7 +93,7 @@ class TestOptions(unittest.TestCase):
                 },
             }
         })
-        options = ResourceOptionsParser(page, 'users', self.parser)
+        options = ResourceOptionsParser(None, page, 'users', self.parser)
         options.build_query_arguments('create', 'POST')
         assert 'create' in self.parser.choices
 
@@ -110,7 +113,7 @@ class TestOptions(unittest.TestCase):
                 },
             }
         })
-        options = ResourceOptionsParser(page, 'users', self.parser)
+        options = ResourceOptionsParser(None, page, 'users', self.parser)
         options.build_query_arguments('create', 'POST')
         assert 'create' in self.parser.choices
 
@@ -122,17 +125,17 @@ class TestOptions(unittest.TestCase):
         page = OptionsPage.from_json({
             'actions': {
                 'POST': {
-                    'limit': {'type': 'integer'}
+                    'max_hosts': {'type': 'integer'}
                 },
             }
         })
-        options = ResourceOptionsParser(page, 'job_templates', self.parser)
+        options = ResourceOptionsParser(None, page, 'organizations', self.parser)
         options.build_query_arguments('create', 'POST')
         assert 'create' in self.parser.choices
 
         out = StringIO()
         self.parser.choices['create'].print_help(out)
-        assert '--limit INTEGER' in out.getvalue()
+        assert '--max_hosts INTEGER' in out.getvalue()
 
     def test_boolean_argument(self):
         page = OptionsPage.from_json({
@@ -142,7 +145,7 @@ class TestOptions(unittest.TestCase):
                 },
             }
         })
-        options = ResourceOptionsParser(page, 'users', self.parser)
+        options = ResourceOptionsParser(None, page, 'users', self.parser)
         options.build_query_arguments('create', 'POST')
         assert 'create' in self.parser.choices
 
@@ -168,7 +171,7 @@ class TestOptions(unittest.TestCase):
                 },
             }
         })
-        options = ResourceOptionsParser(page, 'users', self.parser)
+        options = ResourceOptionsParser(None, page, 'users', self.parser)
         options.build_query_arguments('create', 'POST')
         assert 'create' in self.parser.choices
 
@@ -181,12 +184,13 @@ class TestOptions(unittest.TestCase):
             page = OptionsPage.from_json({
                 'actions': {'GET': {}, 'POST': {}}
             })
-            ResourceOptionsParser(page, 'users', self.parser)
+            ResourceOptionsParser(None, page, 'jobs', self.parser)
             assert method in self.parser.choices
 
             out = StringIO()
             self.parser.choices[method].print_help(out)
             assert 'positional arguments:\n  id' in out.getvalue()
+
 
 class TestSettingsOptions(unittest.TestCase):
 
@@ -203,7 +207,7 @@ class TestSettingsOptions(unittest.TestCase):
             }
         })
         page.endpoint = '/settings/all/'
-        ResourceOptionsParser(page, 'settings', self.parser)
+        ResourceOptionsParser(None, page, 'settings', self.parser)
         assert 'list' in self.parser.choices
         assert 'modify' in self.parser.choices
 

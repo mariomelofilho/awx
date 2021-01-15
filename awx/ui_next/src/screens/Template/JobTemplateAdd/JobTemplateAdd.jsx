@@ -1,55 +1,74 @@
 import React, { useState } from 'react';
-import { withRouter } from 'react-router-dom';
-import { withI18n } from '@lingui/react';
-import { t } from '@lingui/macro';
-import {
-  Card,
-  CardBody,
-  CardHeader,
-  PageSection,
-  Tooltip,
-} from '@patternfly/react-core';
-import CardCloseButton from '@components/CardCloseButton';
+import { useHistory } from 'react-router-dom';
+import { Card, PageSection } from '@patternfly/react-core';
+import { CardBody } from '../../../components/Card';
 import JobTemplateForm from '../shared/JobTemplateForm';
-import { JobTemplatesAPI } from '@api';
+import { JobTemplatesAPI, OrganizationsAPI } from '../../../api';
 
-function JobTemplateAdd({ history, i18n }) {
+function JobTemplateAdd() {
   const [formSubmitError, setFormSubmitError] = useState(null);
+  const history = useHistory();
 
   async function handleSubmit(values) {
-    const { newLabels, removedLabels } = values;
-    delete values.newLabels;
-    delete values.removedLabels;
+    const {
+      labels,
+      instanceGroups,
+      initialInstanceGroups,
+      credentials,
+      webhook_credential,
+      webhook_key,
+      webhook_url,
+      ...remainingValues
+    } = values;
 
     setFormSubmitError(null);
+    remainingValues.project = remainingValues.project.id;
+    remainingValues.webhook_credential = webhook_credential?.id;
     try {
       const {
         data: { id, type },
-      } = await JobTemplatesAPI.create(values);
-      await Promise.all([submitLabels(id, newLabels, removedLabels)]);
+      } = await JobTemplatesAPI.create(remainingValues);
+      await Promise.all([
+        submitLabels(id, labels, values.project.summary_fields.organization.id),
+        submitInstanceGroups(id, instanceGroups),
+        submitCredentials(id, credentials),
+      ]);
       history.push(`/templates/${type}/${id}/details`);
     } catch (error) {
       setFormSubmitError(error);
     }
   }
 
-  async function submitLabels(id, newLabels = [], removedLabels = []) {
-    const disassociationPromises = removedLabels.map(label =>
-      JobTemplatesAPI.disassociateLabel(id, label)
+  async function submitLabels(templateId, labels = [], orgId) {
+    if (!orgId) {
+      try {
+        const {
+          data: { results },
+        } = await OrganizationsAPI.read();
+        orgId = results[0].id;
+      } catch (err) {
+        throw err;
+      }
+    }
+    const associationPromises = labels.map(label =>
+      JobTemplatesAPI.associateLabel(templateId, label, orgId)
     );
-    const associationPromises = newLabels
-      .filter(label => !label.organization)
-      .map(label => JobTemplatesAPI.associateLabel(id, label));
-    const creationPromises = newLabels
-      .filter(label => label.organization)
-      .map(label => JobTemplatesAPI.generateLabel(id, label));
 
-    const results = await Promise.all([
-      ...disassociationPromises,
-      ...associationPromises,
-      ...creationPromises,
-    ]);
-    return results;
+    return Promise.all([...associationPromises]);
+  }
+
+  function submitInstanceGroups(templateId, addedGroups = []) {
+    const associatePromises = addedGroups.map(group =>
+      JobTemplatesAPI.associateInstanceGroup(templateId, group.id)
+    );
+    return Promise.all(associatePromises);
+  }
+
+  function submitCredentials(templateId, credentials = []) {
+    const associateCredentials = credentials.map(cred =>
+      JobTemplatesAPI.associateCredentials(templateId, cred.id)
+    );
+    return Promise.all(associateCredentials);
   }
 
   function handleCancel() {
@@ -59,21 +78,17 @@ function JobTemplateAdd({ history, i18n }) {
   return (
     <PageSection>
       <Card>
-        <CardHeader className="at-u-textRight">
-          <Tooltip content={i18n._(t`Close`)} position="top">
-            <CardCloseButton onClick={handleCancel} />
-          </Tooltip>
-        </CardHeader>
         <CardBody>
           <JobTemplateForm
             handleCancel={handleCancel}
             handleSubmit={handleSubmit}
+            submitError={formSubmitError}
+            isOverrideDisabledLookup
           />
         </CardBody>
-        {formSubmitError ? <div>formSubmitError</div> : ''}
       </Card>
     </PageSection>
   );
 }
 
-export default withI18n()(withRouter(JobTemplateAdd));
+export default JobTemplateAdd;

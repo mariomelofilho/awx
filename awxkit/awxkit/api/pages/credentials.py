@@ -1,20 +1,25 @@
 import logging
 
+import http.client as http
 
+import awxkit.exceptions as exc
+from awxkit.api.mixins import DSAdapter, HasCopy, HasCreate
+from awxkit.api.pages import Organization, Team, User
+from awxkit.api.resources import resources
+from awxkit.config import config
 from awxkit.utils import (
+    PseudoNamespace,
     cloud_types,
     filter_by_class,
     not_provided,
     random_title,
     update_payload,
-    PseudoNamespace)
-from awxkit.api.pages import Organization, User, Team
-from awxkit.api.mixins import HasCreate, HasCopy, DSAdapter
-from awxkit.api.resources import resources
-from awxkit.config import config
+)
 
-from . import base
-from . import page
+from . import base, page
+from .page import exception_from_status_code
+
+from urllib.parse import urljoin
 
 
 log = logging.getLogger(__name__)
@@ -77,9 +82,11 @@ def config_cred_from_kind(kind):
 
 credential_type_name_to_config_kind_map = {
     'amazon web services': 'aws',
+    'ansible galaxy/automation hub api token': 'galaxy',
     'ansible tower': 'tower',
     'google compute engine': 'gce',
     'insights': 'insights',
+    'openshift or kubernetes api bearer token': 'kubernetes',
     'microsoft azure classic (deprecated)': 'azure_classic',
     'microsoft azure resource manager': 'azure_rm',
     'network': 'net',
@@ -143,6 +150,8 @@ def get_payload_field_and_value_from_kwargs_or_config_cred(
 
 class CredentialType(HasCreate, base.Base):
 
+    NATURAL_KEY = ('name', 'kind')
+
     def silent_delete(self):
         if not self.managed_by_tower:
             return super(CredentialType, self).silent_delete()
@@ -168,6 +177,19 @@ class CredentialType(HasCreate, base.Base):
             CredentialTypes(
                 self.connection).post(payload))
 
+    def test(self, data):
+        """Test the credential type endpoint."""
+        response = self.connection.post(urljoin(str(self.url), 'test/'), data)
+        exception = exception_from_status_code(response.status_code)
+        exc_str = "%s (%s) received" % (
+            http.responses[response.status_code], response.status_code
+        )
+        if exception:
+            raise exception(exc_str, response.json())
+        elif response.status_code == http.FORBIDDEN:
+            raise exc.Forbidden(exc_str, response.json())
+        return response
+
 
 page.register_page([resources.credential_type,
                     (resources.credential_types, 'post')], CredentialType)
@@ -185,6 +207,7 @@ class Credential(HasCopy, HasCreate, base.Base):
 
     dependencies = [CredentialType]
     optional_dependencies = [Organization, User, Team]
+    NATURAL_KEY = ('organization', 'name', 'credential_type')
 
     def payload(
             self,
@@ -288,7 +311,7 @@ class Credential(HasCopy, HasCreate, base.Base):
             credential_type=CredentialType,
             user=None,
             team=None,
-            organization=Organization,
+            organization=None,
             inputs=None,
             **kwargs):
         payload = self.create_payload(
@@ -301,6 +324,19 @@ class Credential(HasCopy, HasCreate, base.Base):
         return self.update_identity(
             Credentials(
                 self.connection)).post(payload)
+
+    def test(self, data):
+        """Test the credential endpoint."""
+        response = self.connection.post(urljoin(str(self.url), 'test/'), data)
+        exception = exception_from_status_code(response.status_code)
+        exc_str = "%s (%s) received" % (
+            http.responses[response.status_code], response.status_code
+        )
+        if exception:
+            raise exception(exc_str, response.json())
+        elif response.status_code == http.FORBIDDEN:
+            raise exc.Forbidden(exc_str, response.json())
+        return response
 
     @property
     def expected_passwords_needed_to_start(self):
@@ -330,7 +366,13 @@ class Credentials(page.PageList, Credential):
 
 
 page.register_page([resources.credentials,
-                    resources.related_credentials,
-                    resources.job_extra_credentials,
-                    resources.job_template_extra_credentials],
+                    resources.related_credentials],
                    Credentials)
+
+
+class CredentialCopy(base.Base):
+
+    pass
+
+
+page.register_page(resources.credential_copy, CredentialCopy)

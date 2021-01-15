@@ -1,43 +1,65 @@
 import React from 'react';
 import { string, func } from 'prop-types';
 import { Link } from 'react-router-dom';
-import { Button as PFButton, Tooltip } from '@patternfly/react-core';
-import { PlusIcon } from '@patternfly/react-icons';
+import { Button, DropdownItem, Tooltip } from '@patternfly/react-core';
+import CaretDownIcon from '@patternfly/react-icons/dist/js/icons/caret-down-icon';
 import { withI18n } from '@lingui/react';
 import { t } from '@lingui/macro';
-import styled from 'styled-components';
+import { useKebabifiedMenu } from '../../contexts/Kebabified';
 
-const Button = styled(PFButton)`
-  && {
-    background-color: #5cb85c;
-    padding: 5px 8px;
-    --pf-global--FontSize--md: 14px;
-  }
-`;
+function ToolbarAddButton({
+  linkTo,
+  onClick,
+  i18n,
+  isDisabled,
+  defaultLabel = i18n._(t`Add`),
+  showToggleIndicator,
+}) {
+  const { isKebabified } = useKebabifiedMenu();
 
-function ToolbarAddButton({ linkTo, onClick, i18n }) {
   if (!linkTo && !onClick) {
     throw new Error(
       'ToolbarAddButton requires either `linkTo` or `onClick` prop'
     );
   }
+
+  if (isKebabified) {
+    return (
+      <DropdownItem
+        key="add"
+        isDisabled={isDisabled}
+        component={linkTo ? Link : 'button'}
+        to={linkTo}
+        onClick={!onClick ? undefined : onClick}
+      >
+        {defaultLabel}
+      </DropdownItem>
+    );
+  }
   if (linkTo) {
     return (
-      <Tooltip content={i18n._(t`Add`)} position="top">
+      <Tooltip content={defaultLabel} position="top">
         <Button
+          isDisabled={isDisabled}
           component={Link}
           to={linkTo}
           variant="primary"
-          aria-label={i18n._(t`Add`)}
+          aria-label={defaultLabel}
         >
-          <PlusIcon />
+          {defaultLabel}
         </Button>
       </Tooltip>
     );
   }
   return (
-    <Button variant="primary" aria-label={i18n._(t`Add`)} onClick={onClick}>
-      <PlusIcon />
+    <Button
+      icon={showToggleIndicator ? <CaretDownIcon /> : null}
+      iconPosition={showToggleIndicator ? 'right' : null}
+      variant="primary"
+      aria-label={defaultLabel}
+      onClick={onClick}
+    >
+      {defaultLabel}
     </Button>
   );
 }
