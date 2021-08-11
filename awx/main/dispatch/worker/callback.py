@@ -9,35 +9,35 @@ from django.conf import settings
 from django.utils.timezone import now as tz_now
 from django.db import DatabaseError, OperationalError, connection as django_connection
 from django.db.utils import InterfaceError, InternalError
+from django_guid.middleware import GuidMiddleware
 
 import psutil
 
 import redis
 
 from awx.main.consumers import emit_channel_notification
-from awx.main.models import (JobEvent, AdHocCommandEvent, ProjectUpdateEvent,
-                             InventoryUpdateEvent, SystemJobEvent, UnifiedJob,
-                             Job)
+from awx.main.models import JobEvent, AdHocCommandEvent, ProjectUpdateEvent, InventoryUpdateEvent, SystemJobEvent, UnifiedJob, Job
 from awx.main.tasks import handle_success_and_failure_notifications
 from awx.main.models.events import emit_event_detail
 from awx.main.utils.profiling import AWXProfiler
-
+import awx.main.analytics.subsystem_metrics as s_metrics
 from .base import BaseWorker
 
 logger = logging.getLogger('awx.main.commands.run_callback_receiver')
 
 
 class CallbackBrokerWorker(BaseWorker):
-    '''
+    """
     A worker implementation that deserializes callback event data and persists
     it into the database.
 
     The code that *generates* these types of messages is found in the
     ansible-runner display callback plugin.
-    '''
+    """
 
     MAX_RETRIES = 2
     last_stats = time.time()
+    last_flush = time.time()
     total = 0
     last_event = ''
     prof = None
@@ -46,16 +46,22 @@ class CallbackBrokerWorker(BaseWorker):
         self.buff = {}
         self.pid = os.getpid()
         self.redis = redis.Redis.from_url(settings.BROKER_URL)
+        self.subsystem_metrics = s_metrics.Metrics(auto_pipe_execute=False)
+        self.queue_pop = 0
+        self.queue_name = settings.CALLBACK_QUEUE
         self.prof = AWXProfiler("CallbackBrokerWorker")
         for key in self.redis.keys('awx_callback_receiver_statistics_*'):
             self.redis.delete(key)
 
     def read(self, queue):
         try:
-            res = self.redis.blpop(settings.CALLBACK_QUEUE, timeout=settings.JOB_EVENT_BUFFER_SECONDS)
+            res = self.redis.blpop(self.queue_name, timeout=1)
             if res is None:
                 return {'event': 'FLUSH'}
             self.total += 1
+            self.queue_pop += 1
+            self.subsystem_metrics.inc('callback_receiver_events_popped_redis', 1)
+            self.subsystem_metrics.inc('callback_receiver_events_in_memory', 1)
             return json.loads(res[1])
         except redis.exceptions.RedisError:
             logger.exception("encountered an error communicating with redis")
@@ -64,7 +70,18 @@ class CallbackBrokerWorker(BaseWorker):
             logger.exception("failed to decode JSON message from redis")
         finally:
             self.record_statistics()
+            self.record_read_metrics()
+
         return {'event': 'FLUSH'}
+
+    def record_read_metrics(self):
+        if self.queue_pop == 0:
+            return
+        if self.subsystem_metrics.should_pipe_execute() is True:
+            queue_size = self.redis.llen(self.queue_name)
+            self.subsystem_metrics.set('callback_receiver_events_queue_size_redis', queue_size)
+            self.subsystem_metrics.pipe_execute()
+            self.queue_pop = 0
 
     def record_statistics(self):
         # buffer stat recording to once per (by default) 5s
@@ -81,9 +98,7 @@ class CallbackBrokerWorker(BaseWorker):
 
     @property
     def mb(self):
-        return '{:0.3f}'.format(
-            psutil.Process(self.pid).memory_info().rss / 1024.0 / 1024.0
-        )
+        return '{:0.3f}'.format(psutil.Process(self.pid).memory_info().rss / 1024.0 / 1024.0)
 
     def toggle_profiling(self, *args):
         if not self.prof.is_started():
@@ -100,30 +115,46 @@ class CallbackBrokerWorker(BaseWorker):
 
     def flush(self, force=False):
         now = tz_now()
-        if (
-            force or
-            any([len(events) >= 1000 for events in self.buff.values()])
-        ):
+        if force or (time.time() - self.last_flush) > settings.JOB_EVENT_BUFFER_SECONDS or any([len(events) >= 1000 for events in self.buff.values()]):
+            bulk_events_saved = 0
+            singular_events_saved = 0
+            metrics_events_batch_save_errors = 0
             for cls, events in self.buff.items():
                 logger.debug(f'{cls.__name__}.objects.bulk_create({len(events)})')
                 for e in events:
                     if not e.created:
                         e.created = now
                     e.modified = now
+                duration_to_save = time.perf_counter()
                 try:
                     cls.objects.bulk_create(events)
+                    bulk_events_saved += len(events)
                 except Exception:
                     # if an exception occurs, we should re-attempt to save the
                     # events one-by-one, because something in the list is
                     # broken/stale
+                    metrics_events_batch_save_errors += 1
                     for e in events:
                         try:
                             e.save()
+                            singular_events_saved += 1
                         except Exception:
                             logger.exception('Database Error Saving Job Event')
+                duration_to_save = time.perf_counter() - duration_to_save
                 for e in events:
-                    emit_event_detail(e)
+                    if not getattr(e, '_skip_websocket_message', False):
+                        emit_event_detail(e)
             self.buff = {}
+            self.last_flush = time.time()
+            # only update metrics if we saved events
+            if (bulk_events_saved + singular_events_saved) > 0:
+                self.subsystem_metrics.inc('callback_receiver_batch_events_errors', metrics_events_batch_save_errors)
+                self.subsystem_metrics.inc('callback_receiver_events_insert_db_seconds', duration_to_save)
+                self.subsystem_metrics.inc('callback_receiver_events_insert_db', bulk_events_saved + singular_events_saved)
+                self.subsystem_metrics.observe('callback_receiver_batch_events_insert_db', bulk_events_saved)
+                self.subsystem_metrics.inc('callback_receiver_events_in_memory', -(bulk_events_saved + singular_events_saved))
+            if self.subsystem_metrics.should_pipe_execute() is True:
+                self.subsystem_metrics.pipe_execute()
 
     def perform_work(self, body):
         try:
@@ -149,16 +180,15 @@ class CallbackBrokerWorker(BaseWorker):
 
                 if body.get('event') == 'EOF':
                     try:
+                        if 'guid' in body:
+                            GuidMiddleware.set_guid(body['guid'])
                         final_counter = body.get('final_counter', 0)
                         logger.info('Event processing is finished for Job {}, sending notifications'.format(job_identifier))
                         # EOF events are sent when stdout for the running task is
                         # closed. don't actually persist them to the database; we
                         # just use them to report `summary` websocket events as an
                         # approximation for when a job is "done"
-                        emit_channel_notification(
-                            'jobs-summary',
-                            dict(group_name='jobs', unified_job_id=job_identifier, final_counter=final_counter)
-                        )
+                        emit_channel_notification('jobs-summary', dict(group_name='jobs', unified_job_id=job_identifier, final_counter=final_counter))
                         # Additionally, when we've processed all events, we should
                         # have all the data we need to send out success/failure
                         # notification templates
@@ -173,9 +203,18 @@ class CallbackBrokerWorker(BaseWorker):
                             handle_success_and_failure_notifications.apply_async([uj.id])
                     except Exception:
                         logger.exception('Worker failed to emit notifications: Job {}'.format(job_identifier))
+                    finally:
+                        self.subsystem_metrics.inc('callback_receiver_events_in_memory', -1)
+                        GuidMiddleware.set_guid('')
                     return
 
+                skip_websocket_message = body.pop('skip_websocket_message', False)
+
                 event = cls.create_from_data(**body)
+
+                if skip_websocket_message:
+                    event._skip_websocket_message = True
+
                 self.buff.setdefault(cls, []).append(event)
 
             retries = 0
@@ -188,10 +227,7 @@ class CallbackBrokerWorker(BaseWorker):
                         logger.exception('Worker could not re-establish database connectivity, giving up on one or more events.')
                         return
                     delay = 60 * retries
-                    logger.exception('Database Error Saving Job Event, retry #{i} in {delay} seconds:'.format(
-                        i=retries + 1,
-                        delay=delay
-                    ))
+                    logger.exception('Database Error Saving Job Event, retry #{i} in {delay} seconds:'.format(i=retries + 1, delay=delay))
                     django_connection.close()
                     time.sleep(delay)
                     retries += 1

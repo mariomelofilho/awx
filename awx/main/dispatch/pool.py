@@ -16,6 +16,7 @@ from queue import Full as QueueFull, Empty as QueueEmpty
 from django.conf import settings
 from django.db import connection as django_connection, connections
 from django.core.cache import cache as django_cache
+from django_guid.middleware import GuidMiddleware
 from jinja2 import Template
 import psutil
 
@@ -29,13 +30,12 @@ else:
 
 
 class NoOpResultQueue(object):
-
     def put(self, item):
         pass
 
 
 class PoolWorker(object):
-    '''
+    """
     Used to track a worker child process and its pending and finished messages.
 
     This class makes use of two distinct multiprocessing.Queues to track state:
@@ -61,7 +61,7 @@ class PoolWorker(object):
 
     A worker is "busy" when it has at least one message in self.managed_tasks.
     It is "idle" when self.managed_tasks is empty.
-    '''
+    """
 
     track_managed_tasks = False
 
@@ -90,10 +90,10 @@ class PoolWorker(object):
         self.calculate_managed_tasks()
 
     def quit(self):
-        '''
+        """
         Send a special control message to the worker that tells it to exit
         gracefully.
-        '''
+        """
         self.queue.put('QUIT')
 
     @property
@@ -111,9 +111,7 @@ class PoolWorker(object):
     @property
     def mb(self):
         if self.alive:
-            return '{:0.3f}'.format(
-                psutil.Process(self.pid).memory_info().rss / 1024.0 / 1024.0
-            )
+            return '{:0.3f}'.format(psutil.Process(self.pid).memory_info().rss / 1024.0 / 1024.0)
         return '0'
 
     @property
@@ -178,11 +176,7 @@ class PoolWorker(object):
                 except QueueEmpty:
                     break  # qsize is not always _totally_ up to date
             if len(orphaned):
-                logger.error(
-                    'requeuing {} messages from gone worker pid:{}'.format(
-                        len(orphaned), self.pid
-                    )
-                )
+                logger.error('requeuing {} messages from gone worker pid:{}'.format(len(orphaned), self.pid))
         return orphaned
 
     @property
@@ -201,7 +195,7 @@ class StatefulPoolWorker(PoolWorker):
 
 
 class WorkerPool(object):
-    '''
+    """
     Creates a pool of forked PoolWorkers.
 
     As WorkerPool.write(...) is called (generally, by a kombu consumer
@@ -219,7 +213,7 @@ class WorkerPool(object):
         0,  # preferred worker 0
         'Hello, World!'
     )
-    '''
+    """
 
     pool_cls = PoolWorker
     debug_meta = ''
@@ -283,13 +277,10 @@ class WorkerPool(object):
             '{% endfor %}'
         )
         now = datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')
-        return tmpl.render(
-            pool=self, workers=self.workers, meta=self.debug_meta,
-            dt=now
-        )
+        return tmpl.render(pool=self, workers=self.workers, meta=self.debug_meta, dt=now)
 
     def write(self, preferred_queue, body):
-        queue_order = sorted(range(len(self.workers)), key=lambda x: -1 if x==preferred_queue else x)
+        queue_order = sorted(range(len(self.workers)), key=lambda x: -1 if x == preferred_queue else x)
         write_attempt_order = []
         for queue_actual in queue_order:
             try:
@@ -314,10 +305,10 @@ class WorkerPool(object):
 
 
 class AutoscalePool(WorkerPool):
-    '''
+    """
     An extended pool implementation that automatically scales workers up and
     down based on demand
-    '''
+    """
 
     pool_cls = StatefulPoolWorker
 
@@ -332,7 +323,7 @@ class AutoscalePool(WorkerPool):
             else:
                 total_memory_gb = (psutil.virtual_memory().total >> 30) + 1  # noqa: round up
             # 5 workers per GB of total memory
-            self.max_workers = (total_memory_gb * 5)
+            self.max_workers = total_memory_gb * 5
 
         # max workers can't be less than min_workers
         self.max_workers = max(self.min_workers, self.max_workers)
@@ -409,15 +400,11 @@ class AutoscalePool(WorkerPool):
                 if current_task and isinstance(current_task, dict):
                     if current_task.get('task', '').endswith('tasks.run_task_manager'):
                         if 'started' not in current_task:
-                            w.managed_tasks[
-                                current_task['uuid']
-                            ]['started'] = time.time()
+                            w.managed_tasks[current_task['uuid']]['started'] = time.time()
                         age = time.time() - current_task['started']
                         w.managed_tasks[current_task['uuid']]['age'] = age
                         if age > (60 * 5):
-                            logger.error(
-                                f'run_task_manager has held the advisory lock for >5m, sending SIGTERM to {w.pid}'
-                            )  # noqa
+                            logger.error(f'run_task_manager has held the advisory lock for >5m, sending SIGTERM to {w.pid}')  # noqa
                             os.kill(w.pid, signal.SIGTERM)
 
         for m in orphaned:
@@ -445,6 +432,8 @@ class AutoscalePool(WorkerPool):
             return super(AutoscalePool, self).up()
 
     def write(self, preferred_queue, body):
+        if 'guid' in body:
+            GuidMiddleware.set_guid(body['guid'])
         try:
             # when the cluster heartbeat occurs, clean up internally
             if isinstance(body, dict) and 'cluster_node_heartbeat' in body['task']:

@@ -4,6 +4,7 @@ import logging
 import sys
 import threading
 import time
+import os
 
 # Django
 from django.conf import LazySettings
@@ -19,11 +20,11 @@ from rest_framework.fields import empty, SkipField
 
 import cachetools
 
-# Tower
+# AWX
 from awx.main.utils import encrypt_field, decrypt_field
 from awx.conf import settings_registry
+from awx.conf.fields import PrimaryKeyRelatedField
 from awx.conf.models import Setting
-from awx.conf.migrations._reencrypt import decrypt_field as old_decrypt_field
 
 # FIXME: Gracefully handle when settings are accessed before the database is
 # ready (or during migrations).
@@ -61,12 +62,12 @@ __all__ = ['SettingsWrapper', 'get_settings_to_cache', 'SETTING_CACHE_NOTSET']
 
 @contextlib.contextmanager
 def _ctit_db_wrapper(trans_safe=False):
-    '''
+    """
     Wrapper to avoid undesired actions by Django ORM when managing settings
     if only getting a setting, can use trans_safe=True, which will avoid
     throwing errors if the prior context was a broken transaction.
     Any database errors will be logged, but exception will be suppressed.
-    '''
+    """
     rollback_set = None
     is_atomic = None
     try:
@@ -114,7 +115,6 @@ class TransientSetting(object):
 
 
 class EncryptedCacheProxy(object):
-
     def __init__(self, cache, registry, encrypter=None, decrypter=None):
         """
         This proxy wraps a Django cache backend and overwrites the
@@ -144,19 +144,11 @@ class EncryptedCacheProxy(object):
 
     def set(self, key, value, log=True, **kwargs):
         if log is True:
-            logger.debug('cache set(%r, %r, %r)', key, filter_sensitive(self.registry, key, value),
-                         SETTING_CACHE_TIMEOUT)
-        self.cache.set(
-            key,
-            self._handle_encryption(self.encrypter, key, value),
-            **kwargs
-        )
+            logger.debug('cache set(%r, %r, %r)', key, filter_sensitive(self.registry, key, value), SETTING_CACHE_TIMEOUT)
+        self.cache.set(key, self._handle_encryption(self.encrypter, key, value), **kwargs)
 
     def set_many(self, data, **kwargs):
-        filtered_data = dict(
-            (key, filter_sensitive(self.registry, key, value))
-            for key, value in data.items()
-        )
+        filtered_data = dict((key, filter_sensitive(self.registry, key, value)) for key, value in data.items())
         logger.debug('cache set_many(%r, %r)', filtered_data, SETTING_CACHE_TIMEOUT)
         for key, value in data.items():
             self.set(key, value, log=False, **kwargs)
@@ -167,18 +159,11 @@ class EncryptedCacheProxy(object):
             # as part of the AES key when encrypting/decrypting
             obj_id = self.cache.get(Setting.get_cache_id_key(key), default=empty)
             if obj_id is empty:
-                logger.info('Efficiency notice: Corresponding id not stored in cache %s',
-                            Setting.get_cache_id_key(key))
+                logger.info('Efficiency notice: Corresponding id not stored in cache %s', Setting.get_cache_id_key(key))
                 obj_id = getattr(self._get_setting_from_db(key), 'pk', None)
             elif obj_id == SETTING_CACHE_NONE:
                 obj_id = None
-            return method(
-                TransientSetting(
-                    pk=obj_id,
-                    value=value
-                ),
-                'value'
-            )
+            return method(TransientSetting(pk=obj_id, value=value), 'value')
 
         # If the field in question isn't an "encrypted" field, this function is
         # a no-op; it just returns the provided value
@@ -205,9 +190,9 @@ def get_settings_to_cache(registry):
 
 
 def get_cache_value(value):
-    '''Returns the proper special cache setting for a value
+    """Returns the proper special cache setting for a value
     based on instance type.
-    '''
+    """
     if value is None:
         value = SETTING_CACHE_NONE
     elif isinstance(value, (list, tuple)) and len(value) == 0:
@@ -218,7 +203,6 @@ def get_cache_value(value):
 
 
 class SettingsWrapper(UserSettingsHolder):
-
     @classmethod
     def initialize(cls, cache=None, registry=None):
         """
@@ -230,11 +214,7 @@ class SettingsWrapper(UserSettingsHolder):
         ``awx.conf.settings_registry`` is used by default.
         """
         if not getattr(settings, '_awx_conf_settings', False):
-            settings_wrapper = cls(
-                settings._wrapped,
-                cache=cache or django_cache,
-                registry=registry or settings_registry
-            )
+            settings_wrapper = cls(settings._wrapped, cache=cache or django_cache, registry=registry or settings_registry)
             settings._wrapped = settings_wrapper
 
     def __init__(self, default_settings, cache, registry):
@@ -247,6 +227,7 @@ class SettingsWrapper(UserSettingsHolder):
         # These values have to be stored via self.__dict__ in this way to get
         # around the magic __setattr__ method on this class (which is used to
         # store API-assigned settings in the database).
+        self.__dict__['__forks__'] = {}
         self.__dict__['default_settings'] = default_settings
         self.__dict__['_awx_conf_settings'] = self
         self.__dict__['_awx_conf_preload_expires'] = None
@@ -254,6 +235,26 @@ class SettingsWrapper(UserSettingsHolder):
         self.__dict__['_awx_conf_init_readonly'] = False
         self.__dict__['cache'] = EncryptedCacheProxy(cache, registry)
         self.__dict__['registry'] = registry
+
+        # record the current pid so we compare it post-fork for
+        # processes like the dispatcher and callback receiver
+        self.__dict__['pid'] = os.getpid()
+
+    def __clean_on_fork__(self):
+        pid = os.getpid()
+        # if the current pid does *not* match the value on self, it means
+        # that value was copied on fork, and we're now in a *forked* process;
+        # the *first* time we enter this code path (on setting access),
+        # forcibly close DB/cache sockets and set a marker so we don't run
+        # this code again _in this process_
+        #
+        if pid != self.__dict__['pid'] and pid not in self.__dict__['__forks__']:
+            self.__dict__['__forks__'][pid] = True
+            # It's important to close these post-fork, because we
+            # don't want the forked processes to inherit the open sockets
+            # for the DB and cache connections (that way lies race conditions)
+            connection.close()
+            django_cache.close()
 
     @cached_property
     def all_supported_settings(self):
@@ -297,13 +298,7 @@ class SettingsWrapper(UserSettingsHolder):
                 continue
             if self.registry.is_setting_encrypted(setting.key):
                 setting_ids[setting.key] = setting.id
-                try:
-                    value = decrypt_field(setting, 'value')
-                except ValueError as e:
-                    #TODO: Remove in Tower 3.3
-                    logger.debug('encountered error decrypting field: %s - attempting fallback to old', e)
-                    value = old_decrypt_field(setting, 'value')
-
+                value = decrypt_field(setting, 'value')
             else:
                 value = setting.value
             settings_to_cache[setting.key] = get_cache_value(value)
@@ -323,8 +318,7 @@ class SettingsWrapper(UserSettingsHolder):
         # Generate a cache key for each setting and store them all at once.
         settings_to_cache = dict([(Setting.get_cache_key(k), v) for k, v in settings_to_cache.items()])
         for k, id_val in setting_ids.items():
-            logger.debug('Saving id in cache for encrypted setting %s, %s',
-                         Setting.get_cache_id_key(k), id_val)
+            logger.debug('Saving id in cache for encrypted setting %s, %s', Setting.get_cache_id_key(k), id_val)
             self.cache.cache.set(Setting.get_cache_id_key(k), id_val)
         settings_to_cache['_awx_conf_preload_expires'] = self._awx_conf_preload_expires
         self.cache.set_many(settings_to_cache, timeout=SETTING_CACHE_TIMEOUT)
@@ -350,13 +344,8 @@ class SettingsWrapper(UserSettingsHolder):
         if value is empty:
             setting = None
             setting_id = None
-            if not field.read_only or name in (
-                # these values are read-only - however - we *do* want
-                # to fetch their value from the database
-                'INSTALL_UUID',
-                'AWX_ISOLATED_PRIVATE_KEY',
-                'AWX_ISOLATED_PUBLIC_KEY',
-            ):
+            # this value is read-only, however we *do* want to fetch its value from the database
+            if not field.read_only or name == 'INSTALL_UUID':
                 setting = Setting.objects.filter(key=name, user__isnull=True).order_by('pk').first()
             if setting:
                 if getattr(field, 'encrypted', False):
@@ -398,9 +387,7 @@ class SettingsWrapper(UserSettingsHolder):
                     else:
                         return value
             except Exception:
-                logger.warning(
-                    'The current value "%r" for setting "%s" is invalid.',
-                    value, name, exc_info=True)
+                logger.warning('The current value "%r" for setting "%s" is invalid.', value, name, exc_info=True)
         return empty
 
     def _get_default(self, name):
@@ -427,12 +414,11 @@ class SettingsWrapper(UserSettingsHolder):
             raise ImproperlyConfigured('Setting "{}" is read only.'.format(name))
 
         try:
-            data = field.to_representation(value)
+            data = None if value is None and isinstance(field, PrimaryKeyRelatedField) else field.to_representation(value)
             setting_value = field.run_validation(data)
-            db_value = field.to_representation(setting_value)
+            db_value = None if setting_value is None and isinstance(field, PrimaryKeyRelatedField) else field.to_representation(setting_value)
         except Exception as e:
-            logger.exception('Unable to assign value "%r" to setting "%s".',
-                             value, name, exc_info=True)
+            logger.exception('Unable to assign value "%r" to setting "%s".', value, name, exc_info=True)
             raise e
 
         setting = Setting.objects.filter(key=name, user__isnull=True).order_by('pk').first()
@@ -470,8 +456,7 @@ class SettingsWrapper(UserSettingsHolder):
     def __dir__(self):
         keys = []
         with _ctit_db_wrapper(trans_safe=True):
-            for setting in Setting.objects.filter(
-                    key__in=self.all_supported_settings, user__isnull=True):
+            for setting in Setting.objects.filter(key__in=self.all_supported_settings, user__isnull=True):
                 # Skip returning settings that have been overridden but are
                 # considered to be "not set".
                 if setting.value is None and SETTING_CACHE_NOTSET == SETTING_CACHE_NONE:
@@ -489,7 +474,7 @@ class SettingsWrapper(UserSettingsHolder):
             with _ctit_db_wrapper(trans_safe=True):
                 set_locally = Setting.objects.filter(key=setting, user__isnull=True).exists()
         set_on_default = getattr(self.default_settings, 'is_overridden', lambda s: False)(setting)
-        return (set_locally or set_on_default)
+        return set_locally or set_on_default
 
 
 def __getattr_without_cache__(self, name):

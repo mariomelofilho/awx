@@ -11,9 +11,14 @@ from django.conf import settings
 from awx.main.utils.filters import SmartFilter
 from awx.main.utils.pglock import advisory_lock
 
-___all__ = ['HostManager', 'InstanceManager', 'InstanceGroupManager']
+___all__ = ['HostManager', 'InstanceManager', 'InstanceGroupManager', 'DeferJobCreatedManager']
 
 logger = logging.getLogger('awx.main.managers')
+
+
+class DeferJobCreatedManager(models.Manager):
+    def get_queryset(self):
+        return super(DeferJobCreatedManager, self).get_queryset().defer('job_created')
 
 
 class HostManager(models.Manager):
@@ -28,7 +33,7 @@ class HostManager(models.Manager):
          - Only consider results that are unique
          - Return the count of this query
         """
-        return self.order_by().exclude(inventory_sources__source='tower').values('name').distinct().count()
+        return self.order_by().exclude(inventory_sources__source='controller').values('name').distinct().count()
 
     def org_active_count(self, org_id):
         """Return count of active, unique hosts used by an organization.
@@ -40,24 +45,24 @@ class HostManager(models.Manager):
          - Only consider results that are unique
          - Return the count of this query
         """
-        return self.order_by().exclude(
-            inventory_sources__source='tower'
-        ).filter(inventory__organization=org_id).values('name').distinct().count()
+        return self.order_by().exclude(inventory_sources__source='controller').filter(inventory__organization=org_id).values('name').distinct().count()
 
     def get_queryset(self):
         """When the parent instance of the host query set has a `kind=smart` and a `host_filter`
         set. Use the `host_filter` to generate the queryset for the hosts.
         """
-        qs = super(HostManager, self).get_queryset().defer(
-            'last_job__extra_vars',
-            'last_job_host_summary__job__extra_vars',
-            'last_job__artifacts',
-            'last_job_host_summary__job__artifacts',
+        qs = (
+            super(HostManager, self)
+            .get_queryset()
+            .defer(
+                'last_job__extra_vars',
+                'last_job_host_summary__job__extra_vars',
+                'last_job__artifacts',
+                'last_job_host_summary__job__artifacts',
+            )
         )
 
-        if (hasattr(self, 'instance') and
-           hasattr(self.instance, 'host_filter') and
-           hasattr(self.instance, 'kind')):
+        if hasattr(self, 'instance') and hasattr(self.instance, 'host_filter') and hasattr(self.instance, 'kind'):
             if self.instance.kind == 'smart' and self.instance.host_filter is not None:
                 q = SmartFilter.query_from_string(self.instance.host_filter)
                 if self.instance.organization_id:
@@ -94,24 +99,25 @@ class InstanceManager(models.Manager):
     Provides "table-level" methods including getting the currently active
     instance or role.
     """
+
     def me(self):
         """Return the currently active instance."""
         # If we are running unit tests, return a stub record.
         if settings.IS_TESTING(sys.argv) or hasattr(sys, '_called_from_test'):
-            return self.model(id=1,
-                              hostname='localhost',
-                              uuid='00000000-0000-0000-0000-000000000000')
+            return self.model(id=1, hostname='localhost', uuid='00000000-0000-0000-0000-000000000000')
 
         node = self.filter(hostname=settings.CLUSTER_HOST_ID)
         if node.exists():
             return node[0]
         raise RuntimeError("No instance found with the current cluster host id")
 
-    def register(self, uuid=None, hostname=None, ip_address=None):
+    def register(self, uuid=None, hostname=None, ip_address=None, node_type=None):
         if not uuid:
             uuid = settings.SYSTEM_UUID
         if not hostname:
             hostname = settings.CLUSTER_HOST_ID
+        if not node_type:
+            node_type = "hybrid"
         with advisory_lock('instance_registration_%s' % hostname):
             if settings.AWX_AUTO_DEPROVISION_INSTANCES:
                 # detect any instances with the same IP address.
@@ -127,24 +133,29 @@ class InstanceManager(models.Manager):
             instance = self.filter(hostname=hostname)
             if instance.exists():
                 instance = instance.get()
+                update_fields = []
                 if instance.ip_address != ip_address:
                     instance.ip_address = ip_address
-                    instance.save(update_fields=['ip_address'])
+                    update_fields.append('ip_address')
+                if instance.node_type != node_type:
+                    instance.node_type = node_type
+                    update_fields.append('node_type')
+                if update_fields:
+                    instance.save(update_fields=update_fields)
                     return (True, instance)
                 else:
                     return (False, instance)
-            instance = self.create(uuid=uuid,
-                                   hostname=hostname,
-                                   ip_address=ip_address,
-                                   capacity=0)
+            instance = self.create(uuid=uuid, hostname=hostname, ip_address=ip_address, capacity=0, node_type=node_type)
         return (True, instance)
 
     def get_or_register(self):
         if settings.AWX_AUTO_DEPROVISION_INSTANCES:
             from awx.main.management.commands.register_queue import RegisterQueue
+
             pod_ip = os.environ.get('MY_POD_IP')
             registered = self.register(ip_address=pod_ip)
-            RegisterQueue('tower', None, 100, 0, []).register()
+            RegisterQueue(settings.DEFAULT_CONTROL_PLANE_QUEUE_NAME, 100, 0, [], is_container_group=False).register()
+            RegisterQueue(settings.DEFAULT_EXECUTION_QUEUE_NAME, 100, 0, [], is_container_group=True).register()
             return registered
         else:
             return (False, self.me())
@@ -152,13 +163,6 @@ class InstanceManager(models.Manager):
     def active_count(self):
         """Return count of active Tower nodes for licensing."""
         return self.all().count()
-
-    def my_role(self):
-        # NOTE: TODO: Likely to repurpose this once standalone ramparts are a thing
-        return "tower"
-
-    def all_non_isolated(self):
-        return self.exclude(rampart_groups__controller__isnull=False)
 
 
 class InstanceGroupManager(models.Manager):
@@ -177,10 +181,7 @@ class InstanceGroupManager(models.Manager):
         ig_instance_mapping = {}
         # Create dictionaries that represent basic m2m memberships
         for group in qs:
-            ig_instance_mapping[group.name] = set(
-                instance.hostname for instance in group.instances.all() if
-                instance.capacity != 0
-            )
+            ig_instance_mapping[group.name] = set(instance.hostname for instance in group.instances.all() if instance.capacity != 0)
             for inst in group.instances.all():
                 if inst.capacity == 0:
                     continue
@@ -209,8 +210,7 @@ class InstanceGroupManager(models.Manager):
         instance_ig_mapping, ig_ig_mapping = self.capacity_mapping(qs=qs)
 
         if tasks is None:
-            tasks = self.model.unifiedjob_set.related.related_model.objects.filter(
-                status__in=('running', 'waiting'))
+            tasks = self.model.unifiedjob_set.related.related_model.objects.filter(status__in=('running', 'waiting'))
 
         if graph is None:
             graph = {group.name: {} for group in qs}
@@ -237,9 +237,8 @@ class InstanceGroupManager(models.Manager):
             elif t.status == 'running':
                 # Subtract capacity from all groups that contain the instance
                 if t.execution_node not in instance_ig_mapping:
-                    if not t.is_containerized:
-                        logger.warning('Detected %s running inside lost instance, '
-                                       'may still be waiting for reaper.', t.log_format)
+                    if not t.is_container_group_task:
+                        logger.warning('Detected %s running inside lost instance, ' 'may still be waiting for reaper.', t.log_format)
                     if t.instance_group:
                         impacted_groups = [t.instance_group.name]
                     else:

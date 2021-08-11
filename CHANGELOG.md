@@ -1,6 +1,154 @@
 # Changelog
 
-This is a list of high-level changes for each release of AWX. A full list of commits can be found at `https://github.com/ansible/awx/releases/tag/<version>`.
+# 19.2.2 (June 28, 2021)
+
+- Fixed bug where symlinks pointing to directories were not preserved (https://github.com/ansible/ansible-runner/pull/736)
+- Various bugfixes found during testing (https://github.com/ansible/awx/pull/10532)
+
+# 19.2.1 (June 17, 2021)
+
+- There are now 2 default Instance Groups: 'controlplane' and 'default' (https://github.com/ansible/awx/pull/10324)
+- Removed deprecated modules: `tower_send`, `tower_receive`, `tower_workflow_template` (https://github.com/ansible/awx/pull/9980)
+- Improved UI performance when a large amount of events are being emitted by jobs (https://github.com/ansible/awx/pull/10053)
+- Settings UI Revert All button now issues a DELETE instead of PATCHing all fields (https://github.com/ansible/awx/pull/10376)
+- Fixed a bug with the schedule date/time picker in Firefox (https://github.com/ansible/awx/pull/10291)
+- UI now preselects the system default Galaxy credential when creating a new organization (https://github.com/ansible/awx/pull/10395)
+- Added favicon (https://github.com/ansible/awx/pull/10388)
+- Removed `not` option from smart inventory host filter search as it's not supported by the API (https://github.com/ansible/awx/pull/10380)
+- Added button to allow user to refetch project revision after project sync has finished (https://github.com/ansible/awx/pull/10334)
+- Fixed bug where extraneous CONFIG requests were made on logout (https://github.com/ansible/awx/pull/10379)
+- Fixed bug where users were unable to cancel inventory syncs (https://github.com/ansible/awx/pull/10346)
+- Added missing dashboard graph filters (https://github.com/ansible/awx/pull/10349)
+- Added support for typing in to single select lookup form fields (https://github.com/ansible/awx/pull/10257)
+- Fixed various bugs related to user sessions (https://github.com/ansible/awx/pull/9908)
+- Fixed bug where sorting in modals would close the modal (https://github.com/ansible/awx/pull/10215)
+- Added support for Red Hat Insights as an inventory source (https://github.com/ansible/awx/pull/8650)
+- Fixed bugs when selecting items in a list then sorting/paginating (https://github.com/ansible/awx/pull/10329)
+
+# 19.2.0 (June 1, 2021)
+- Fixed race condition that would sometimes cause jobs to error out at the very end of an otherwise successful run (https://github.com/ansible/receptor/pull/328)
+- Fixes bug where users were unable to click on text next to checkboxes in modals (https://github.com/ansible/awx/pull/10279)
+- Have the project update playbook warn if role/collection syncing is disabled. (https://github.com/ansible/awx/pull/10068)
+- Move irc references to point to irc.libera.chat (https://github.com/ansible/awx/pull/10295)
+- Fixes bug where activity stream changes were displaying as [object object] (https://github.com/ansible/awx/pull/10267)
+- Update awxkit to enable export of Galaxy credentials associated to organizations (https://github.com/ansible/awx/pull/10271)
+- Bump receptor and receptorctl versions to 1.0.0a2 (https://github.com/ansible/awx/pull/10261)
+- Add the ability to disable local authentication (https://github.com/ansible/awx/pull/10102)
+- Show error if no Execution Environment is found on project sync/job run (https://github.com/ansible/awx/pull/10183)
+- Allow for editing and deleting managed_by_tower EEs from API/UI (https://github.com/ansible/awx/pull/10173)
+
+
+# 19.1.0 (May 1, 2021)
+
+- Custom inventory scripts have been removed from the API https://github.com/ansible/awx/pull/9822
+  - Old scripts can be exported via `awx-manage export_custom_scripts`
+- Fixed a bug where ad-hoc commands targeted against multiple hosts would run against only 1 host https://github.com/ansible/awx/pull/9973
+- AWX will now look for a top-level requirements.yml when installing collections / roles in project updates https://github.com/ansible/awx/pull/9945
+- Improved error handling when Container Group pods fail to launch https://github.com/ansible/awx/pull/10025
+- Added ability to set server-side password policies using Django's AUTH_PASSWORD_VALIDATORS setting https://github.com/ansible/awx/pull/9999
+- Bumped versions of Ansible Runner & AWX EE https://github.com/ansible/awx/pull/10013
+  - If you have built any custom EEs on top of awx-ee 0.1.0, you will need to rebuild on top of 0.2.0.
+- Remove legacy resource profiling code https://github.com/ansible/awx/pull/9883
+
+# 19.0.0 (April 7, 2021)
+
+- AWX now runs on Python 3.8 (https://github.com/ansible/awx/pull/8778/)
+- Fixed inventories-from-projects when running in Kubernetes (https://github.com/ansible/awx/pull/9741)
+- Fixed a bug where a slash was appended to invetory file paths in UI dropdown (https://github.com/ansible/awx/pull/9713)
+- Fix a bug with large file parsing in project sync (https://github.com/ansible/awx/pull/9627)
+- Fix k8s credentials that use a custom ca cert (https://github.com/ansible/awx/pull/9744)
+- Fix a bug that allowed a user to attempt deleting a running job (https://github.com/ansible/awx/pull/9758)
+- Fixed the Kubernetes Pod reaper to properly delete Pods launched by Receptor (https://github.com/ansible/awx/pull/9819)
+- AWX Collection Modules: added ability to set instance groups for organization, job templates, and inventories. (https://github.com/ansible/awx/pull/9804)
+- Fixed CSP violation errors on job details and job settings views (https://github.com/ansible/awx/pull/9818)
+- Added support for convergence any/all on workflow nodes (https://github.com/ansible/awx/pull/9737)
+- Fixed race condition that causes InvalidGitRepositoryError (https://github.com/ansible/awx/pull/9754)
+- Added support for Execution Environments to the Activity Stream (https://github.com/ansible/awx/issues/9308)
+- Fixed a bug that improperly formats OpenSSH keys specified in custom Credential Types (https://github.com/ansible/awx/issues/9361)
+- Fixed an HTTP 500 error for unauthenticated users (https://github.com/ansible/awx/pull/9725)
+- Added subscription wizard: https://github.com/ansible/awx/pull/9496
+
+# 18.0.0 (March 23, 2021)
+
+**IMPORTANT INSTALL AND UPGRADE NOTES**
+
+Starting in version 18.0, the [AWX Operator](https://github.com/ansible/awx-operator) is the preferred way to install AWX: https://github.com/ansible/awx/blob/devel/INSTALL.md#installing-awx
+
+If you have a pre-existing installation of AWX that utilizes the Docker-based installation method, this install method has ** notably changed** from 17.x to 18.x.  For details, please see:
+
+- https://groups.google.com/g/awx-project/c/47MjWSUQaOc/m/bCjSDn0eBQAJ
+- https://github.com/ansible/awx/blob/devel/tools/docker-compose
+- https://github.com/ansible/awx/blob/devel/tools/docker-compose/docs/data_migration.md
+
+### Introducing Execution Environments
+
+After a herculean effort from a number of contributors, we're excited to announce that AWX 18.0.0 introduces a new concept called Execution Environments.
+
+Execution Environments are container images which consist of everything necessary to run a playbook within AWX, and which drive the entire management and lifecycle of playbook execution runtime in AWX: https://github.com/ansible/awx/issues/5157.  This means that going forward, AWX no longer utilizes the [bubblewrap](https://github.com/containers/bubblewrap) project for playbook isolation, but instead utilizes a container per playbook run.
+
+Much like custom virtualenvs, custom Execution Environments can be crafted to specify additional Python or system-level dependencies.  [Ansible Builder](https://github.com/ansible/ansible-builder) outputs images you can upload to your registry which can *then* be defined in AWX and utilized for playbook runs.
+
+To learn more about Ansible Builder and Execution Environments, see: https://www.ansible.com/blog/introduction-to-ansible-builder
+
+### Other Notable Changes
+
+- Removed `installer` directory.
+  - The Kubernetes installer has been removed in favor of [AWX Operator](https://github.com/ansible/awx-operator).  Official images for Operator-based installs are no longer hosted on Docker Hub, but are instead available on [Quay](https://quay.io/repository/ansible/awx?tab=tags).
+  - The "Local Docker" install method has been removed in favor of the development environment. Details can be found at: https://github.com/ansible/awx/blob/devel/tools/docker-compose/README.md
+- Removal of custom virtual environments https://github.com/ansible/awx/pull/9498
+  - Custom virtual environments have been replaced by Execution Environments https://github.com/ansible/awx/pull/9570
+- The default Container Group Pod definition has changed. All custom Pod specs have been reset. https://github.com/ansible/awx/commit/05ef51f710dad8f8036bc5acee4097db4adc0d71
+- Added user interface for the activity stream: https://github.com/ansible/awx/pull/9083
+- Converted many of the top-level list views (Jobs, Teams, Hosts, Inventories, Projects, and more) to a new, permanent table component for substantially increased responsiveness, usability, maintainability, and other 'ility's: https://github.com/ansible/awx/pull/8970, https://github.com/ansible/awx/pull/9182 and many others!
+- Added support for Centrify Vault (https://www.centrify.com) as a credential lookup plugin (https://github.com/ansible/awx/pull/9542)
+- Added support for namespaces in Hashicorp Vault credential plugin (https://github.com/ansible/awx/pull/9590)
+- Added click-to-expand details for job tables
+- Added search filtering to job output https://github.com/ansible/awx/pull/9208
+- Added the new migration, update, and "installation in progress" page https://github.com/ansible/awx/pull/9123
+- Added the user interface for job settings https://github.com/ansible/awx/pull/8661
+- Runtime errors from jobs are now displayed, along with an explanation for what went wrong, on the output page https://github.com/ansible/awx/pull/8726
+- You can now cancel a running job from its output and details panel https://github.com/ansible/awx/pull/9199
+- Fixed a bug where launch prompt inputs were unexpectedly deposited in the url: https://github.com/ansible/awx/pull/9231
+- Playbook, credential type, and inventory file inputs now support type-ahead and manual type-in! https://github.com/ansible/awx/pull/9120
+- Added ability to relaunch against failed hosts: https://github.com/ansible/awx/pull/9225
+- Added pending workflow approval count to the application header https://github.com/ansible/awx/pull/9334
+- Added user interface for management jobs: https://github.com/ansible/awx/pull/9224
+- Added toast message to show notification template test result to notification templates list https://github.com/ansible/awx/pull/9318
+- Replaced CodeMirror with AceEditor for editing template variables and notification templates https://github.com/ansible/awx/pull/9281
+- Added support for filtering and pagination on job output https://github.com/ansible/awx/pull/9208
+- Added support for html in custom login text https://github.com/ansible/awx/pull/9519
+
+# 17.1.0 (March 9, 2021)
+- Addressed a security issue in AWX (CVE-2021-20253)
+- Fixed a bug permissions error related to redis in K8S-based deployments: https://github.com/ansible/awx/issues/9401
+
+# 17.0.1 (January 26, 2021)
+- Fixed pgdocker directory permissions issue with Local Docker installer: https://github.com/ansible/awx/pull/9152
+- Fixed a bug in the UI which caused toggle settings to not be changed when clicked: https://github.com/ansible/awx/pull/9093
+
+# 17.0.0 (January 22, 2021)
+- AWX now requires PostgreSQL 12 by default: https://github.com/ansible/awx/pull/8943
+  **Note:** users who encounter permissions errors at upgrade time should `chown -R ~/.awx/pgdocker` to ensure it's owned by the user running the install playbook
+- Added support for region name for OpenStack inventory: https://github.com/ansible/awx/issues/5080
+- Added the ability to chain undefined attributes in custom notification templates: https://github.com/ansible/awx/issues/8677
+- Dramatically simplified the `image_build` role: https://github.com/ansible/awx/pull/8980
+- Fixed a bug which can cause schema migrations to fail at install time: https://github.com/ansible/awx/issues/9077
+- Fixed a bug which caused the `is_superuser` user property to be out of date in certain circumstances: https://github.com/ansible/awx/pull/8833
+- Fixed a bug which sometimes results in race conditions on setting access: https://github.com/ansible/awx/pull/8580
+- Fixed a bug which sometimes causes an unexpected delay in stdout for some playbooks: https://github.com/ansible/awx/issues/9085
+- (UI) Added support for credential password prompting on job launch: https://github.com/ansible/awx/pull/9028
+- (UI) Added the ability to configure LDAP settings in the UI: https://github.com/ansible/awx/issues/8291
+- (UI) Added a sync button to the Project detail view: https://github.com/ansible/awx/issues/8847
+- (UI) Added a form for configuring Google Outh 2.0 settings: https://github.com/ansible/awx/pull/8762
+- (UI) Added searchable keys and related keys to the Credentials list: https://github.com/ansible/awx/issues/8603
+- (UI) Added support for advanced search and copying to Notification Templates: https://github.com/ansible/awx/issues/7879
+- (UI) Added support for prompting on workflow nodes: https://github.com/ansible/awx/issues/5913
+- (UI) Added support for session timeouts: https://github.com/ansible/awx/pull/8250
+- (UI) Fixed a bug that broke websocket streaming for the insecure ws:// protocol: https://github.com/ansible/awx/pull/8877
+- (UI) Fixed a bug in the user interface when a translation for the browser's preferred locale isn't available: https://github.com/ansible/awx/issues/8884
+- (UI) Fixed bug where navigating from one survey question form directly to another wasn't reloading the form: https://github.com/ansible/awx/issues/7522
+- (UI) Fixed a bug which can cause an uncaught error while launching a Job Template: https://github.com/ansible/awx/issues/8936
+- Updated autobahn to address CVE-2020-35678
 
 ## 16.0.0 (December 10, 2020)
 - AWX now ships with a reimagined user interface.  **Please read this before upgrading:** https://groups.google.com/g/awx-project/c/KuT5Ao92HWo

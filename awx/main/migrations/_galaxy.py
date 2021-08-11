@@ -19,7 +19,7 @@ def migrate_galaxy_settings(apps, schema_editor):
         # nothing to migrate
         return
     set_current_apps(apps)
-    ModernCredentialType.setup_tower_managed_defaults()
+    ModernCredentialType.setup_tower_managed_defaults(apps)
     CredentialType = apps.get_model('main', 'CredentialType')
     Credential = apps.get_model('main', 'Credential')
     Setting = apps.get_model('conf', 'Setting')
@@ -27,24 +27,28 @@ def migrate_galaxy_settings(apps, schema_editor):
     galaxy_type = CredentialType.objects.get(kind='galaxy')
     private_galaxy_url = Setting.objects.filter(key='PRIMARY_GALAXY_URL').first()
 
-    # by default, prior versions of AWX/Tower automatically pulled content
+    # by default, prior versions of AWX automatically pulled content
     # from galaxy.ansible.com
     public_galaxy_enabled = True
     public_galaxy_setting = Setting.objects.filter(key='PUBLIC_GALAXY_ENABLED').first()
     if public_galaxy_setting and public_galaxy_setting.value is False:
         # ...UNLESS this behavior was explicitly disabled via this setting
         public_galaxy_enabled = False
-
-    public_galaxy_credential = Credential(
-        created=now(),
-        modified=now(),
-        name='Ansible Galaxy',
-        managed_by_tower=True,
-        credential_type=galaxy_type,
-        inputs = {
-            'url': 'https://galaxy.ansible.com/'
-        }
-    )
+    try:
+        # Needed for old migrations
+        public_galaxy_credential = Credential(
+            created=now(),
+            modified=now(),
+            name='Ansible Galaxy',
+            managed_by_tower=True,
+            credential_type=galaxy_type,
+            inputs={'url': 'https://galaxy.ansible.com/'},
+        )
+    except:
+        # Needed for new migrations, tests
+        public_galaxy_credential = Credential(
+            created=now(), modified=now(), name='Ansible Galaxy', managed=True, credential_type=galaxy_type, inputs={'url': 'https://galaxy.ansible.com/'}
+        )
     public_galaxy_credential.save()
 
     for org in Organization.objects.all():
@@ -59,9 +63,7 @@ def migrate_galaxy_settings(apps, schema_editor):
                     'Please provide an API token instead after your upgrade '
                     'has completed',
                 )
-            inputs = {
-                'url': private_galaxy_url.value
-            }
+            inputs = {'url': private_galaxy_url.value}
             token = Setting.objects.filter(key='PRIMARY_GALAXY_TOKEN').first()
             if token and token.value:
                 inputs['token'] = decrypt_field(token, 'value')
@@ -71,14 +73,7 @@ def migrate_galaxy_settings(apps, schema_editor):
             name = f'Private Galaxy ({private_galaxy_url.value})'
             if 'cloud.redhat.com' in inputs['url']:
                 name = f'Ansible Automation Hub ({private_galaxy_url.value})'
-            cred = Credential(
-                created=now(),
-                modified=now(),
-                name=name,
-                organization=org,
-                credential_type=galaxy_type,
-                inputs=inputs
-            )
+            cred = Credential(created=now(), modified=now(), name=name, organization=org, credential_type=galaxy_type, inputs=inputs)
             cred.save()
             if token and token.value:
                 # encrypt based on the primary key from the prior save
@@ -105,14 +100,7 @@ def migrate_galaxy_settings(apps, schema_editor):
                 inputs['token'] = token
             if auth_url:
                 inputs['auth_url'] = auth_url
-            cred = Credential(
-                created=now(),
-                modified=now(),
-                name=f'Ansible Galaxy ({url})',
-                organization=org,
-                credential_type=galaxy_type,
-                inputs=inputs
-            )
+            cred = Credential(created=now(), modified=now(), name=f'Ansible Galaxy ({url})', organization=org, credential_type=galaxy_type, inputs=inputs)
             cred.save()
             if token:
                 # encrypt based on the primary key from the prior save

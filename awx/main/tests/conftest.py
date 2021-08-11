@@ -1,10 +1,9 @@
-
 # Python
 import pytest
 from unittest import mock
 from contextlib import contextmanager
 
-from awx.main.models import Credential
+from awx.main.models import Credential, UnifiedJob
 from awx.main.tests.factories import (
     create_organization,
     create_job_template,
@@ -19,18 +18,18 @@ from django.core.cache import cache
 
 
 def pytest_addoption(parser):
-    parser.addoption(
-        "--genschema", action="store_true", default=False, help="execute schema validator"
-    )
+    parser.addoption("--genschema", action="store_true", default=False, help="execute schema validator")
 
 
 def pytest_configure(config):
     import sys
+
     sys._called_from_test = True
 
 
 def pytest_unconfigure(config):
     import sys
+
     del sys._called_from_test
 
 
@@ -41,12 +40,12 @@ def mock_access():
         try:
             mock_instance = mock.MagicMock(__name__='foobar')
             MockAccess = mock.MagicMock(return_value=mock_instance)
-            the_patch = mock.patch.dict('awx.main.access.access_registry',
-                                        {TowerClass: MockAccess}, clear=False)
+            the_patch = mock.patch.dict('awx.main.access.access_registry', {TowerClass: MockAccess}, clear=False)
             the_patch.__enter__()
             yield mock_instance
         finally:
             the_patch.__exit__()
+
     return access_given_class
 
 
@@ -82,18 +81,25 @@ def instance_group_factory():
 
 @pytest.fixture
 def default_instance_group(instance_factory, instance_group_factory):
-    return create_instance_group("tower", instances=[create_instance("hostA")])
+    return create_instance_group("default", instances=[create_instance("hostA")])
 
 
 @pytest.fixture
 def job_template_with_survey_passwords_factory(job_template_factory):
     def rf(persisted):
         "Returns job with linked JT survey with password survey questions"
-        objects = job_template_factory('jt', organization='org1', survey=[
-            {'variable': 'submitter_email', 'type': 'text', 'default': 'foobar@redhat.com'},
-            {'variable': 'secret_key', 'default': '6kQngg3h8lgiSTvIEb21', 'type': 'password'},
-            {'variable': 'SSN', 'type': 'password'}], persisted=persisted)
+        objects = job_template_factory(
+            'jt',
+            organization='org1',
+            survey=[
+                {'variable': 'submitter_email', 'type': 'text', 'default': 'foobar@redhat.com'},
+                {'variable': 'secret_key', 'default': '6kQngg3h8lgiSTvIEb21', 'type': 'password'},
+                {'variable': 'SSN', 'type': 'password'},
+            ],
+            persisted=persisted,
+        )
         return objects.job_template
+
     return rf
 
 
@@ -142,4 +148,30 @@ def mock_external_credential_input_sources():
     # We mock that behavior out of credentials by default unless we need to
     # test it explicitly.
     with mock.patch.object(Credential, 'dynamic_input_fields', new=[]) as _fixture:
+        yield _fixture
+
+
+@pytest.fixture(scope='session', autouse=True)
+def mock_has_unpartitioned_events():
+    # has_unpartitioned_events determines if there are any events still
+    # left in the old, unpartitioned job events table. In order to work,
+    # this method looks up when the partition migration occurred. When
+    # Django's unit tests run, however, there will be no record of the migration.
+    # We mock this out to circumvent the migration query.
+    with mock.patch.object(UnifiedJob, 'has_unpartitioned_events', new=False) as _fixture:
+        yield _fixture
+
+
+@pytest.fixture(scope='session', autouse=True)
+def mock_get_event_queryset_no_job_created():
+    """
+    SQLite friendly since partitions aren't supported. Do not add the faked job_created field to the filter. If we do, it will result in an sql query for the
+    job_created field. That field does not actually exist in a non-partition scenario.
+    """
+
+    def event_qs(self):
+        kwargs = {self.event_parent_key: self.id}
+        return self.event_class.objects.filter(**kwargs)
+
+    with mock.patch.object(UnifiedJob, 'get_event_queryset', lambda self: event_qs(self)) as _fixture:
         yield _fixture

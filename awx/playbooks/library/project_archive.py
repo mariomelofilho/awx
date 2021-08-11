@@ -1,8 +1,4 @@
-ANSIBLE_METADATA = {
-    "metadata_version": "1.0",
-    "status": ["stableinterface"],
-    "supported_by": "community",
-}
+ANSIBLE_METADATA = {"metadata_version": "1.0", "status": ["stableinterface"], "supported_by": "community"}
 
 
 DOCUMENTATION = """
@@ -13,7 +9,7 @@ description:
   - Unpacks an archive that contains a project, in order to support handling versioned
     artifacts from (for example) GitHub Releases or Artifactory builds.
   - Handles projects in the archive root, or in a single base directory of the archive.
-version_added: "2.9"
+version_added: "2.9.0"
 options:
   src:
     description:

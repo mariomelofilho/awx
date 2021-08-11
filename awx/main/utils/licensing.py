@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 import collections
 import copy
 import io
+import os
 import json
 import logging
 import re
@@ -34,8 +35,6 @@ from cryptography import x509
 from django.conf import settings
 from django.utils.translation import ugettext_lazy as _
 
-# AWX
-from awx.main.models import Host
 
 MAX_INSTANCES = 9999999
 
@@ -104,7 +103,7 @@ class Licenser(object):
         license_date=0,
         license_type="UNLICENSED",
         product_name="Red Hat Ansible Automation Platform",
-        valid_key=False
+        valid_key=False,
     )
 
     def __init__(self, **kwargs):
@@ -128,10 +127,8 @@ class Licenser(object):
         else:
             self._unset_attrs()
 
-
     def _unset_attrs(self):
         self._attrs = self.UNLICENSED_DATA.copy()
-
 
     def license_from_manifest(self, manifest):
         def is_appropriate_manifest_sub(sub):
@@ -162,12 +159,12 @@ class Licenser(object):
         license = dict()
         for sub in manifest:
             if not is_appropriate_manifest_sub(sub):
-                logger.warning("Subscription %s (%s) in manifest is not active or for another product" %
-                               (sub['pool']['productName'], sub['pool']['productId']))
+                logger.warning("Subscription %s (%s) in manifest is not active or for another product" % (sub['pool']['productName'], sub['pool']['productId']))
                 continue
             if not _can_aggregate(sub, license):
-                logger.warning("Subscription %s (%s) in manifest does not match other manifest subscriptions" %
-                               (sub['pool']['productName'], sub['pool']['productId']))
+                logger.warning(
+                    "Subscription %s (%s) in manifest does not match other manifest subscriptions" % (sub['pool']['productName'], sub['pool']['productId'])
+                )
                 continue
 
             license.setdefault('sku', sub['pool']['productId'])
@@ -179,7 +176,7 @@ class Licenser(object):
             license.setdefault('satellite', False)
             # Use the nearest end date
             endDate = parse_date(sub['endDate'])
-            currentEndDateStr = license.get('license_date', '4102462800') # 2100-01-01
+            currentEndDateStr = license.get('license_date', '4102462800')  # 2100-01-01
             currentEndDate = datetime.fromtimestamp(int(currentEndDateStr), timezone.utc)
             if endDate < currentEndDate:
                 license['license_date'] = endDate.strftime('%s')
@@ -193,7 +190,6 @@ class Licenser(object):
         settings.LICENSE = self._attrs
         return self._attrs
 
-
     def update(self, **kwargs):
         # Update attributes of the current license.
         if 'instance_count' in kwargs:
@@ -201,7 +197,6 @@ class Licenser(object):
         if 'license_date' in kwargs:
             kwargs['license_date'] = int(kwargs['license_date'])
         self._attrs.update(kwargs)
-
 
     def validate_rh(self, user, pw):
         try:
@@ -211,7 +206,7 @@ class Licenser(object):
             host = None
         if not host:
             host = getattr(settings, 'REDHAT_CANDLEPIN_HOST', None)
-        
+
         if not user:
             raise ValueError('subscriptions_username is required')
 
@@ -226,35 +221,24 @@ class Licenser(object):
             return self.generate_license_options_from_entitlements(json)
         return []
 
-
     def get_rhsm_subs(self, host, user, pw):
         verify = getattr(settings, 'REDHAT_CANDLEPIN_VERIFY', True)
         json = []
         try:
-            subs = requests.get(
-                '/'.join([host, 'subscription/users/{}/owners'.format(user)]),
-                verify=verify,
-                auth=(user, pw)
-            )
+            subs = requests.get('/'.join([host, 'subscription/users/{}/owners'.format(user)]), verify=verify, auth=(user, pw))
         except requests.exceptions.ConnectionError as error:
             raise error
         except OSError as error:
-            raise OSError('Unable to open certificate bundle {}. Check that Ansible Tower is running on Red Hat Enterprise Linux.'.format(verify)) from error # noqa
+            raise OSError(
+                'Unable to open certificate bundle {}. Check that the service is running on Red Hat Enterprise Linux.'.format(verify)
+            ) from error  # noqa
         subs.raise_for_status()
 
         for sub in subs.json():
-            resp = requests.get(
-                '/'.join([
-                    host,
-                    'subscription/owners/{}/pools/?match=*tower*'.format(sub['key'])
-                ]),
-                verify=verify,
-                auth=(user, pw)
-            )
+            resp = requests.get('/'.join([host, 'subscription/owners/{}/pools/?match=*tower*'.format(sub['key'])]), verify=verify, auth=(user, pw))
             resp.raise_for_status()
             json.extend(resp.json())
         return json
-
 
     def get_satellite_subs(self, host, user, pw):
         port = None
@@ -268,25 +252,20 @@ class Licenser(object):
             host = ':'.join([host, port])
         json = []
         try:
-            orgs = requests.get(
-                '/'.join([host, 'katello/api/organizations']),
-                verify=verify,
-                auth=(user, pw)
-            )
+            orgs = requests.get('/'.join([host, 'katello/api/organizations']), verify=verify, auth=(user, pw))
         except requests.exceptions.ConnectionError as error:
             raise error
         except OSError as error:
-            raise OSError('Unable to open certificate bundle {}. Check that Ansible Tower is running on Red Hat Enterprise Linux.'.format(verify)) from error # noqa
+            raise OSError(
+                'Unable to open certificate bundle {}. Check that the service is running on Red Hat Enterprise Linux.'.format(verify)
+            ) from error  # noqa
         orgs.raise_for_status()
-        
+
         for org in orgs.json()['results']:
             resp = requests.get(
-                '/'.join([
-                    host,
-                    '/katello/api/organizations/{}/subscriptions/?search=Red Hat Ansible Automation'.format(org['id'])
-                ]),
+                '/'.join([host, '/katello/api/organizations/{}/subscriptions/?search=Red Hat Ansible Automation'.format(org['id'])]),
                 verify=verify,
-                auth=(user, pw)
+                auth=(user, pw),
             )
             resp.raise_for_status()
             results = resp.json()['results']
@@ -307,12 +286,10 @@ class Licenser(object):
                     json.append(license)
         return json
 
-
     def is_appropriate_sat_sub(self, sub):
         if 'Red Hat Ansible Automation' not in sub['subscription_name']:
             return False
         return True
-
 
     def is_appropriate_sub(self, sub):
         if sub['activeSubscription'] is False:
@@ -323,9 +300,9 @@ class Licenser(object):
             return True
         return False
 
-
     def generate_license_options_from_entitlements(self, json):
         from dateutil.parser import parse
+
         ValidSub = collections.namedtuple('ValidSub', 'sku name support_level end_date trial quantity pool_id satellite')
         valid_subs = []
         for sub in json:
@@ -363,9 +340,7 @@ class Licenser(object):
                         if attr.get('name') == 'support_level':
                             support_level = attr.get('value')
 
-                valid_subs.append(ValidSub(
-                    sku, sub['productName'], support_level, end_date, trial, quantity, pool_id, satellite
-                ))
+                valid_subs.append(ValidSub(sku, sub['productName'], support_level, end_date, trial, quantity, pool_id, satellite))
 
         if valid_subs:
             licenses = []
@@ -378,54 +353,48 @@ class Licenser(object):
                 if sub.trial:
                     license._attrs['trial'] = True
                     license._attrs['license_type'] = 'trial'
-                license._attrs['instance_count'] = min(
-                    MAX_INSTANCES, license._attrs['instance_count']
-                )
+                license._attrs['instance_count'] = min(MAX_INSTANCES, license._attrs['instance_count'])
                 human_instances = license._attrs['instance_count']
                 if human_instances == MAX_INSTANCES:
                     human_instances = 'Unlimited'
-                subscription_name = re.sub(
-                    r' \([\d]+ Managed Nodes',
-                    ' ({} Managed Nodes'.format(human_instances),
-                    sub.name
-                )
+                subscription_name = re.sub(r' \([\d]+ Managed Nodes', ' ({} Managed Nodes'.format(human_instances), sub.name)
                 license._attrs['subscription_name'] = subscription_name
                 license._attrs['satellite'] = satellite
                 license._attrs['valid_key'] = True
-                license.update(
-                    license_date=int(sub.end_date.strftime('%s'))
-                )
-                license.update(
-                    pool_id=sub.pool_id
-                )
+                license.update(license_date=int(sub.end_date.strftime('%s')))
+                license.update(pool_id=sub.pool_id)
                 licenses.append(license._attrs.copy())
             return licenses
 
-        raise ValueError(
-            'No valid Red Hat Ansible Automation subscription could be found for this account.'  # noqa
-        )
-
+        raise ValueError('No valid Red Hat Ansible Automation subscription could be found for this account.')  # noqa
 
     def validate(self):
         # Return license attributes with additional validation info.
         attrs = copy.deepcopy(self._attrs)
         type = attrs.get('license_type', 'none')
 
-        if (type == 'UNLICENSED' or False):
+        if type == 'UNLICENSED' or False:
             attrs.update(dict(valid_key=False, compliant=False))
             return attrs
         attrs['valid_key'] = True
 
-        if Host:
-            current_instances = Host.objects.active_count()
+        from awx.main.models import Host, HostMetric, Instance
+
+        current_instances = Host.objects.active_count()
+        license_date = int(attrs.get('license_date', 0) or 0)
+        automated_instances = HostMetric.objects.count()
+        first_host = HostMetric.objects.only('first_automation').order_by('first_automation').first()
+        if first_host:
+            automated_since = int(first_host.first_automation.timestamp())
         else:
-            current_instances = 0
+            automated_since = int(Instance.objects.order_by('id').first().created.timestamp())
         instance_count = int(attrs.get('instance_count', 0))
         attrs['current_instances'] = current_instances
-        free_instances = (instance_count - current_instances)
+        attrs['automated_instances'] = automated_instances
+        attrs['automated_since'] = automated_since
+        free_instances = instance_count - automated_instances
         attrs['free_instances'] = max(0, free_instances)
 
-        license_date = int(attrs.get('license_date', 0) or 0)
         current_date = int(time.time())
         time_remaining = license_date - current_date
         attrs['time_remaining'] = time_remaining
@@ -437,3 +406,19 @@ class Licenser(object):
         attrs['date_warning'] = bool(time_remaining < self.SUBSCRIPTION_TIMEOUT)
         attrs['date_expired'] = bool(time_remaining <= 0)
         return attrs
+
+
+def get_licenser(*args, **kwargs):
+    from awx.main.utils.licensing import Licenser, OpenLicense
+
+    try:
+        if os.path.exists('/var/lib/awx/.tower_version'):
+            return Licenser(*args, **kwargs)
+        else:
+            return OpenLicense()
+    except Exception as e:
+        raise ValueError(_('Error importing License: %s') % e)
+
+
+def server_product_name():
+    return 'AWX' if isinstance(get_licenser(), OpenLicense) else 'Red Hat Ansible Automation Platform'

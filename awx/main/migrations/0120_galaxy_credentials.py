@@ -3,15 +3,11 @@
 import logging
 
 import awx.main.fields
-from awx.main.utils.encryption import encrypt_field, decrypt_field
 
 from django.db import migrations, models
-from django.utils.timezone import now
 import django.db.models.deletion
 
 from awx.main.migrations import _galaxy as galaxy
-from awx.main.models import CredentialType as ModernCredentialType
-from awx.main.utils.common import set_current_apps
 
 logger = logging.getLogger('awx.main.migrations')
 
@@ -26,7 +22,21 @@ class Migration(migrations.Migration):
         migrations.AlterField(
             model_name='credentialtype',
             name='kind',
-            field=models.CharField(choices=[('ssh', 'Machine'), ('vault', 'Vault'), ('net', 'Network'), ('scm', 'Source Control'), ('cloud', 'Cloud'), ('token', 'Personal Access Token'), ('insights', 'Insights'), ('external', 'External'), ('kubernetes', 'Kubernetes'), ('galaxy', 'Galaxy/Automation Hub')], max_length=32),
+            field=models.CharField(
+                choices=[
+                    ('ssh', 'Machine'),
+                    ('vault', 'Vault'),
+                    ('net', 'Network'),
+                    ('scm', 'Source Control'),
+                    ('cloud', 'Cloud'),
+                    ('token', 'Personal Access Token'),
+                    ('insights', 'Insights'),
+                    ('external', 'External'),
+                    ('kubernetes', 'Kubernetes'),
+                    ('galaxy', 'Galaxy/Automation Hub'),
+                ],
+                max_length=32,
+            ),
         ),
         migrations.CreateModel(
             name='OrganizationGalaxyCredentialMembership',
@@ -40,12 +50,14 @@ class Migration(migrations.Migration):
         migrations.AddField(
             model_name='organization',
             name='galaxy_credentials',
-            field=awx.main.fields.OrderedManyToManyField(blank=True, related_name='organization_galaxy_credentials', through='main.OrganizationGalaxyCredentialMembership', to='main.Credential'),
+            field=awx.main.fields.OrderedManyToManyField(
+                blank=True, related_name='organization_galaxy_credentials', through='main.OrganizationGalaxyCredentialMembership', to='main.Credential'
+            ),
         ),
         migrations.AddField(
             model_name='credential',
             name='managed_by_tower',
             field=models.BooleanField(default=False, editable=False),
         ),
-        migrations.RunPython(galaxy.migrate_galaxy_settings)
+        migrations.RunPython(galaxy.migrate_galaxy_settings),
     ]

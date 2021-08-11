@@ -1,20 +1,21 @@
-
 import pytest
 import re
 from unittest import mock
 
-from awx.sso.pipeline import (
-    update_user_orgs,
-    update_user_teams,
-    update_user_orgs_by_saml_attr,
-    update_user_teams_by_saml_attr,
-)
+from django.utils.timezone import now
 
-from awx.main.models import (
-    User,
-    Team,
-    Organization
-)
+from awx.sso.pipeline import update_user_orgs, update_user_teams, update_user_orgs_by_saml_attr, update_user_teams_by_saml_attr
+
+from awx.main.models import User, Team, Organization, Credential, CredentialType
+
+
+@pytest.fixture
+def galaxy_credential():
+    galaxy_type = CredentialType.objects.create(kind='galaxy')
+    cred = Credential(
+        created=now(), modified=now(), name='Ansible Galaxy', managed=True, credential_type=galaxy_type, inputs={'url': 'https://galaxy.ansible.com/'}
+    )
+    cred.save()
 
 
 @pytest.fixture
@@ -26,33 +27,13 @@ def users():
 
 
 @pytest.mark.django_db
-class TestSAMLMap():
-
+class TestSAMLMap:
     @pytest.fixture
     def backend(self):
         class Backend:
             s = {
-                'ORGANIZATION_MAP': {
-                    'Default': {
-                        'remove': True,
-                        'admins': 'foobar',
-                        'remove_admins': True,
-                        'users': 'foo',
-                        'remove_users': True,
-                    }
-                },
-                'TEAM_MAP': {
-                    'Blue': {
-                        'organization': 'Default',
-                        'remove': True,
-                        'users': '',
-                    },
-                    'Red': {
-                        'organization': 'Default',
-                        'remove': True,
-                        'users': '',
-                    }
-                }
+                'ORGANIZATION_MAP': {'Default': {'remove': True, 'admins': 'foobar', 'remove_admins': True, 'users': 'foo', 'remove_users': True}},
+                'TEAM_MAP': {'Blue': {'organization': 'Default', 'remove': True, 'users': ''}, 'Red': {'organization': 'Default', 'remove': True, 'users': ''}},
             }
 
             def setting(self, key):
@@ -64,7 +45,7 @@ class TestSAMLMap():
     def org(self):
         return Organization.objects.create(name="Default")
 
-    def test_update_user_orgs(self, org, backend, users):
+    def test_update_user_orgs(self, org, backend, users, galaxy_credential):
         u1, u2, u3 = users
 
         # Test user membership logic with regular expressions
@@ -96,7 +77,11 @@ class TestSAMLMap():
         assert org.admin_role.members.count() == 2
         assert org.member_role.members.count() == 2
 
-    def test_update_user_teams(self, backend, users):
+        for o in Organization.objects.all():
+            assert o.galaxy_credentials.count() == 1
+            assert o.galaxy_credentials.first().name == 'Ansible Galaxy'
+
+    def test_update_user_teams(self, backend, users, galaxy_credential):
         u1, u2, u3 = users
 
         # Test user membership logic with regular expressions
@@ -130,19 +115,19 @@ class TestSAMLMap():
         assert Team.objects.get(name="Red").member_role.members.count() == 2
         assert Team.objects.get(name="Blue").member_role.members.count() == 2
 
+        for o in Organization.objects.all():
+            assert o.galaxy_credentials.count() == 1
+            assert o.galaxy_credentials.first().name == 'Ansible Galaxy'
+
 
 @pytest.mark.django_db
-class TestSAMLAttr():
-
+class TestSAMLAttr:
     @pytest.fixture
     def kwargs(self):
         return {
             'username': u'cmeyers@redhat.com',
             'uid': 'idp:cmeyers@redhat.com',
-            'request': {
-                u'SAMLResponse': [],
-                u'RelayState': [u'idp']
-            },
+            'request': {u'SAMLResponse': [], u'RelayState': [u'idp']},
             'is_new': False,
             'response': {
                 'session_index': '_0728f0e0-b766-0135-75fa-02842b07c044',
@@ -156,14 +141,14 @@ class TestSAMLAttr():
                     'User.LastName': ['Meyers'],
                     'name_id': 'cmeyers@redhat.com',
                     'User.FirstName': ['Chris'],
-                    'PersonImmutableID': []
-                }
+                    'PersonImmutableID': [],
+                },
             },
             #'social': <UserSocialAuth: cmeyers@redhat.com>,
             'social': None,
             #'strategy': <awx.sso.strategies.django_strategy.AWXDjangoStrategy object at 0x8523a10>,
             'strategy': None,
-            'new_association': False
+            'new_association': False,
         }
 
     @pytest.fixture
@@ -181,7 +166,7 @@ class TestSAMLAttr():
         else:
             autocreate = True
 
-        class MockSettings():
+        class MockSettings:
             SAML_AUTO_CREATE_OBJECTS = autocreate
             SOCIAL_AUTH_SAML_ORGANIZATION_ATTR = {
                 'saml_attr': 'memberOf',
@@ -200,15 +185,13 @@ class TestSAMLAttr():
                     {'team': 'Red', 'organization': 'Default1'},
                     {'team': 'Green', 'organization': 'Default1'},
                     {'team': 'Green', 'organization': 'Default3'},
-                    {
-                        'team': 'Yellow', 'team_alias': 'Yellow_Alias',
-                        'organization': 'Default4', 'organization_alias': 'Default4_Alias'
-                    },
-                ]
+                    {'team': 'Yellow', 'team_alias': 'Yellow_Alias', 'organization': 'Default4', 'organization_alias': 'Default4_Alias'},
+                ],
             }
+
         return MockSettings()
 
-    def test_update_user_orgs_by_saml_attr(self, orgs, users, kwargs, mock_settings):
+    def test_update_user_orgs_by_saml_attr(self, orgs, users, galaxy_credential, kwargs, mock_settings):
         with mock.patch('django.conf.settings', mock_settings):
             o1, o2, o3 = orgs
             u1, u2, u3 = users
@@ -241,7 +224,11 @@ class TestSAMLAttr():
             assert o2.member_role.members.count() == 3
             assert o3.member_role.members.count() == 1
 
-    def test_update_user_teams_by_saml_attr(self, orgs, users, kwargs, mock_settings):
+        for o in Organization.objects.all():
+            assert o.galaxy_credentials.count() == 1
+            assert o.galaxy_credentials.first().name == 'Ansible Galaxy'
+
+    def test_update_user_teams_by_saml_attr(self, orgs, users, galaxy_credential, kwargs, mock_settings):
         with mock.patch('django.conf.settings', mock_settings):
             o1, o2, o3 = orgs
             u1, u2, u3 = users
@@ -296,7 +283,11 @@ class TestSAMLAttr():
             assert Team.objects.get(name='Green', organization__name='Default1').member_role.members.count() == 3
             assert Team.objects.get(name='Green', organization__name='Default3').member_role.members.count() == 3
 
-    def test_update_user_teams_alias_by_saml_attr(self, orgs, users, kwargs, mock_settings):
+        for o in Organization.objects.all():
+            assert o.galaxy_credentials.count() == 1
+            assert o.galaxy_credentials.first().name == 'Ansible Galaxy'
+
+    def test_update_user_teams_alias_by_saml_attr(self, orgs, users, galaxy_credential, kwargs, mock_settings):
         with mock.patch('django.conf.settings', mock_settings):
             u1 = users[0]
 
@@ -308,8 +299,12 @@ class TestSAMLAttr():
 
             assert Team.objects.filter(name='Yellow', organization__name='Default4').count() == 0
             assert Team.objects.filter(name='Yellow_Alias', organization__name='Default4_Alias').count() == 1
-            assert Team.objects.get(
-                name='Yellow_Alias', organization__name='Default4_Alias').member_role.members.count() == 1
+            assert Team.objects.get(name='Yellow_Alias', organization__name='Default4_Alias').member_role.members.count() == 1
+
+        # only Org 4 got created/updated
+        org = Organization.objects.get(name='Default4_Alias')
+        assert org.galaxy_credentials.count() == 1
+        assert org.galaxy_credentials.first().name == 'Ansible Galaxy'
 
     @pytest.mark.fixture_args(autocreate=False)
     def test_autocreate_disabled(self, users, kwargs, mock_settings):
@@ -349,3 +344,16 @@ class TestSAMLAttr():
 
         assert Team.objects.get(name='Green', organization__name='Default1').member_role.members.count() == 3
         assert Team.objects.get(name='Green', organization__name='Default3').member_role.members.count() == 3
+
+    def test_galaxy_credential_auto_assign(self, users, kwargs, galaxy_credential, mock_settings):
+        kwargs['response']['attributes']['memberOf'] = ['Default1', 'Default2', 'Default3']
+        kwargs['response']['attributes']['groups'] = ['Blue', 'Red', 'Green']
+        with mock.patch('django.conf.settings', mock_settings):
+            for u in users:
+                update_user_orgs_by_saml_attr(None, None, u, **kwargs)
+                update_user_teams_by_saml_attr(None, None, u, **kwargs)
+
+        assert Organization.objects.count() == 4
+        for o in Organization.objects.all():
+            assert o.galaxy_credentials.count() == 1
+            assert o.galaxy_credentials.first().name == 'Ansible Galaxy'

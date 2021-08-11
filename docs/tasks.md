@@ -156,17 +156,11 @@ One of the most important tasks in a clustered AWX installation is the periodic 
 
 If a node in an AWX cluster discovers that one of its peers has not updated its heartbeat within a certain grace period, it is assumed to be offline, and its capacity is set to zero to avoid scheduling new tasks on that node. Additionally, jobs allegedly running or scheduled to run on that node are assumed to be lost, and "reaped", or marked as failed.
 
-
-#### Isolated Tasks and Their Heartbeats
-
-AWX reports as much status as it can via the browsable API at `/api/v2/ping` in order to provide validation of the health of an instance, including the timestamps of the last heartbeat. Since isolated nodes don't have access to the AWX database, their heartbeats are performed by controller nodes instead. A periodic task, `awx_isolated_heartbeat`, is responsible for periodically connecting from a controller to each isolated node and retrieving its capacity (via SSH).
-
-When a job is scheduled to run on an isolated instance, the controller instance puts together the metadata required to run the job and then transfers it to the isolated instance. Once the metadata has been synchronized to the isolated host, the controller instance starts a process on the isolated instance, which consumes the metadata and starts running `ansible/ansible-playbook`. As the playbook runs, job artifacts (such as `stdout` and job events) are written to disk on the isolated instance.
-
-Alternatively: "While the job runs on the isolated instance, the controller instance periodically checks for and copies the job artifacts (_e.g._, `stdout` and job events) that it produces. It processes these until the job finishes running."
-
-To read more about Isolated Instances, refer to the [Isolated Instance Groups](https://docs.ansible.com/ansible-tower/latest/html/administration/clustering.html#isolated-instance-groups) section of the Clustering page in the Ansible Tower Administration guide.
-
+## Reaping Receptor Work Units
+When an AWX job is launched via receptor, files such as status, stdin, and stdout are created in a specific receptor directory. This directory on disk is a random 8 character string, e.g. qLL2JFNT
+This is also called the work Unit ID in receptor, and is used in various receptor commands, e.g. "work results qLL2JFNT"
+After an AWX job executes, the receptor work unit directory is cleaned up by issuing the work release command. In some cases the release process might fail, or if AWX crashes during a job's execution, the work release command is never issued to begin with.
+As such, there is a periodic task that will obtain a list of all receptor work units, and find which ones belong to AWX jobs that are in a completed state (status is canceled, error, or succeeded). This task will call "work release" on each of these work units to clean up the files on disk.
 
 ## AWX Jobs
 
@@ -187,7 +181,7 @@ This task spawns an `ansible` process, which then runs a command using Ansible. 
 - Build a dictionary of passwords for the SSH private key, SSH user and sudo/su.
 - Build an environment dictionary for Ansible.
 - Build a command line argument list for running Ansible, optionally using `ssh-agent` for public/private key authentication.
-- Return whether the task should use `bwrap`.
+- Return whether the task should use process isolation.
 
 For more information on ad hoc commands, read the [Running Ad Hoc Commands section](https://docs.ansible.com/ansible-tower/latest/html/userguide/inventories.html#running-ad-hoc-commands) of the Inventories page of the Ansible Tower User Guide.
 

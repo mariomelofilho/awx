@@ -67,12 +67,8 @@ setup(
         'PyYAML',
         'requests',
     ],
-    python_requires=">=3.6",
-    extras_require={
-        'formatting': ['jq'],
-        'websockets': ['websocket-client>0.54.0'],
-        'crypto': ['cryptography']
-    },
+    python_requires=">=3.8",
+    extras_require={'formatting': ['jq'], 'websockets': ['websocket-client==0.57.0'], 'crypto': ['cryptography']},
     license='Apache 2.0',
     classifiers=[
         'Development Status :: 5 - Production/Stable',
@@ -83,14 +79,9 @@ setup(
         'Operating System :: MacOS :: MacOS X',
         'Operating System :: POSIX :: Linux',
         'Programming Language :: Python',
-        'Programming Language :: Python :: 3.6',
+        'Programming Language :: Python :: 3.8',
         'Topic :: System :: Software Distribution',
         'Topic :: System :: Systems Administration',
     ],
-    entry_points={
-        'console_scripts': [
-            'akit=awxkit.scripts.basic_session:load_interactive',
-            'awx=awxkit.cli:run'
-        ]
-    }
+    entry_points={'console_scripts': ['akit=awxkit.scripts.basic_session:load_interactive', 'awx=awxkit.cli:run']},
 )
